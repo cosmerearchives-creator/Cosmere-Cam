@@ -1,0 +1,35 @@
+name: Publish Windows source ZIP
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify source
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'dynamic_teleprompter/app.py')) { throw 'Application source missing' }
+          python -m compileall -q dynamic_teleprompter
+      - name: Create source ZIP without proprietary assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging/dynamic_teleprompter | Out-Null
+          robocopy dynamic_teleprompter staging/dynamic_teleprompter /E /XD __pycache__ .venv build dist /XF *.pyc *.dll *.pdb *.moc3 *.mp4 *.mkv *.wav *.model3.json *.motion3.json *.physics3.json *.exp3.json | Out-Null
+          if ($LASTEXITCODE -ge 8) { throw "Robocopy failed: $LASTEXITCODE" }
+          Compress-Archive -Path staging/dynamic_teleprompter -DestinationPath Cosmere-Cam-${{ github.ref_name }}-Windows-source.zip -Force
+      - name: Publish prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" "Cosmere-Cam-${{ github.ref_name }}-Windows-source.zip" --title "Cosmere-Cam ${{ github.ref_name }}" --notes "Windows source ZIP. Run setup_windows.bat then start_windows.bat. Requires separate licensed Cubism Core runtime and system dependencies." --prerelease
