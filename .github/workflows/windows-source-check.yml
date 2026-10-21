@@ -30,6 +30,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path staging/dynamic_teleprompter | Out-Null
           robocopy dynamic_teleprompter staging/dynamic_teleprompter /E /XD __pycache__ .venv build dist /XF *.pyc *.dll *.pdb *.moc3 *.mp4 *.mkv *.wav *.model3.json *.motion3.json *.physics3.json *.exp3.json | Out-Null
           if ($LASTEXITCODE -ge 8) { throw "Robocopy failed: $LASTEXITCODE" }
+          $global:LASTEXITCODE = 0
           Compress-Archive -Path staging/dynamic_teleprompter -DestinationPath Cosmere-Cam-source.zip -Force
       - uses: actions/upload-artifact@v4
         with:
