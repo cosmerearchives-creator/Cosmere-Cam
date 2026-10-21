@@ -1,0 +1,41 @@
+name: Windows source check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile Python source
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dynamic_teleprompter/app.py")) {
+            throw "Baseline source missing: import the alpha16.1 code before building."
+          }
+          python -m compileall -q dynamic_teleprompter
+      - name: Package source for Windows
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path output | Out-Null
+          $files = Get-ChildItem dynamic_teleprompter -Recurse -File | Where-Object {
+            $_.FullName -notmatch '__pycache__|\\\.git\\|\\\.venv\\' -and
+            $_.Extension -notin @('.pyc','.dll','.pdb','.moc3','.mp4','.wav')
+          }
+          if (-not $files) { throw 'No source files found' }
+          Compress-Archive -Path dynamic_teleprompter -DestinationPath output/Cosmere-Cam-source.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cosmere-Cam-Windows-source
+          path: output/Cosmere-Cam-source.zip
+          retention-days: 30
