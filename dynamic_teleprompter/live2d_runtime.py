@@ -10,9 +10,12 @@ import json
 import math
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt, QPointF
+from PySide6.QtCore import QCoreApplication, QRectF, Qt, QPointF
 from PySide6.QtGui import QPainter, QPainterPath, QImage, QTransform
 from live2d_idle import animation_values, microphone
+from live2d_movement import perspective_scale
+from live2d_worker import LatestPoseWorker
+from collections import OrderedDict
 
 
 class Vector2(C.Structure):
@@ -99,6 +102,32 @@ class CubismMeshModel:
         self.dll.csmUpdateModel(self._model)
         self.last_pose = pose
         return True
+
+    def movement_bounds(self, width, height):
+        """Conservative visible mesh bounds, normalized to the rendered image.
+
+        Called only by the model's owning worker. Masking can shrink these
+        bounds; including all visible vertices safely accounts for padding.
+        """
+        d, m = self.dll, self._model
+        counts = d.csmGetDrawableVertexCounts(m)
+        vertices = d.csmGetDrawableVertexPositions(m)
+        opacity = d.csmGetDrawableOpacities(m)
+        factor = min(width / self.canvas.X, height / self.canvas.Y)
+        left, top, right, bottom = 1., 1., 0., 0.
+        for i in range(self.count):
+            if opacity[i] <= 0 or not vertices[i]:
+                continue
+            for j in range(counts[i]):
+                v = vertices[i][j]
+                x = .5 + (v.X * self.ppu.value + self.origin.X - self.canvas.X / 2) * factor / width
+                y = .5 - (v.Y * self.ppu.value + self.origin.Y - self.canvas.Y / 2) * factor / height
+                left, top = min(left, x), min(top, y)
+                right, bottom = max(right, x), max(bottom, y)
+        if right <= left or bottom <= top:
+            return 0., 0., 1., 1.
+        bounds = max(0., left), max(0., top), min(1., right), min(1., bottom)
+        return bounds if bounds[0] < bounds[2] and bounds[1] < bounds[3] else (0., 0., 1., 1.)
 
     def draw(self, painter, canvas_width, canvas_height):
         """Render static Cubism geometry with basic clipping masks and blend modes.
@@ -270,115 +299,123 @@ class CubismCore:
         return CubismMeshModel(path,self.dll)
 
 
-_core = None
-_models = {}
-_pose_images = {}
-_errors = set()
-_last_error = {}
-# CPU Cubism triangle rasterization is expensive. Build pose at bounded raster
-# resolution, then composite the cached RGBA image at project dimensions.
-# Moving the layer still updates on every regular canvas frame.
+# Model loading, DLL access, pose updates and triangle drawing all belong to
+# the single worker. Qt paint handlers only submit immutable control snapshots
+# and composite the last completed QImage.
 MAX_LIVE2D_RASTER_EDGE = 640
-MIN_LIVE2D_POSE_INTERVAL = 0.12
+_worker = None
+_last_error = {}
+_errors = set()
+
+
+class _PoseRenderer:
+    def __init__(self):
+        self.core = None
+        self.models = OrderedDict()
+
+    def __call__(self, key, payload):
+        path, _ = key
+        w, h, pose = payload
+        if self.core is None:
+            self.core = CubismCore()
+        if key not in self.models:
+            self.models[key] = (self.core.load(path), None, None)
+        model, size, result = self.models[key]
+        self.models.move_to_end(key)
+        while len(self.models) > 5:
+            self.models.popitem(last=False)
+        changed = model.set_tracking(dict(pose))
+        if changed or size != (w, h) or result is None:
+            raster_scale = min(1., MAX_LIVE2D_RASTER_EDGE / max(w, h))
+            rw, rh = max(1, round(w * raster_scale)), max(1, round(h * raster_scale))
+            image = QImage(rw, rh, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(image)
+            try:
+                model.draw(painter, rw, rh)
+            finally:
+                painter.end()
+            result = (image, model.movement_bounds(rw, rh))
+            self.models[key] = (model, (w, h), result)
+        return result
+
+
+def shutdown_live2d():
+    global _worker
+    if _worker is not None:
+        _worker.close()
+        _worker = None
+
+
+def _pose_worker():
+    global _worker
+    if _worker is None:
+        _worker = LatestPoseWorker(_PoseRenderer())
+        app = QCoreApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(shutdown_live2d)
+    return _worker
 
 
 def live2d_error(path):
     return _last_error.get(str(path), '')
 
+
+def live2d_render_stats(layer):
+    """Last background job duration/count, for performance diagnostics."""
+    key = str(layer.get('path', '')), id(layer)
+    return _worker.stats(key) if _worker is not None else {}
+
+
 def draw_live2d(painter, layer, canvas_size):
-    """Paint a cached static mesh pose; reuse across live preview and recording."""
-    global _core
-    path = layer.get('path', '')
+    """Composite the latest worker image without waiting for model rendering."""
+    path = str(layer.get('path', ''))
     try:
-        if _core is None:
-            _core = CubismCore()
-        if path not in _models:
-            _models[path] = _core.load(path)
-        model = _models[path]
         w, h = canvas_size
         pose = {}
         if layer.get('tracking', False):
             from face_tracking import current_tracking
-            pose = current_tracking()
+            pose.update(current_tracking())
         if layer.get('idle_enabled', False):
-            # The Qt CPU mesh renderer is costly; cap dynamic geometry rebuilds.
-            import time
-            now = time.monotonic()
-            if now >= model._next_idle_update:
-                model._idle_pose = animation_values(layer, microphone.level(), now)
-                model._next_idle_update = now + 1/15
-            pose.update(getattr(model, '_idle_pose', {}))
-        # Keep alpha12's static pose unchanged until tracking actually provides data.
-        if not pose and model.last_pose is not None and model.parameter_defaults:
-            pose = {k: model.parameter_defaults[i] for k, i in model.parameter_indices.items()
-                    if k in ('ParamAngleX', 'ParamAngleY', 'ParamAngleZ', 'ParamBodyAngleX')}
+            pose.update(animation_values(layer, microphone.level()))
         movement = layer.get('movement', {})
         if movement.get('enabled', False):
-            # A local override is intentional: keyboard movement wins over head Y tracking.
-            strength = float(movement.get('head_strength', 65)) / 100.0
-            pose['ParamAngleY'] = float(layer.get('_movement_turn', 0)) * 30.0 * strength
-        # Changes in animation parameters may require costly mesh reconstruction.
-        # Allow normal translation/scale to render at full canvas FPS while
-        # limiting geometry regeneration on the UI thread.
-        import time
-        now_pose = time.monotonic()
-        next_pose = getattr(model, '_next_mesh_update', 0.0)
-        ready = now_pose >= next_pose or model.last_pose is None
-        changed = model.set_tracking(pose) if ready else False
-        if changed:
-            model._next_mesh_update = now_pose + MIN_LIVE2D_POSE_INTERVAL
-        if changed:
-            for old_key in list(_pose_images):
-                if old_key[0] == path:
-                    del _pose_images[old_key]
-        key = (path, int(w), int(h))
-        if key not in _pose_images:
-            raster_scale = min(1.0, MAX_LIVE2D_RASTER_EDGE / max(w, h))
-            raster_w = max(1, round(w * raster_scale))
-            raster_h = max(1, round(h * raster_scale))
-            image = QImage(raster_w, raster_h, QImage.Format.Format_ARGB32_Premultiplied)
-            image.fill(Qt.GlobalColor.transparent)
-            p = QPainter(image)
-            try:
-                import time
-                draw_start = time.perf_counter()
-                model.draw(p, raster_w, raster_h)
-                draw_elapsed = time.perf_counter() - draw_start
-                # Adaptive safety valve: if drawing this model is slow, spend
-                # less time updating its pose so key/mouse events stay usable.
-                model._next_mesh_update = max(
-                    getattr(model, '_next_mesh_update', 0.0),
-                    time.monotonic() + min(0.75, max(MIN_LIVE2D_POSE_INTERVAL, draw_elapsed * 2.0))
-                )
-            finally:
-                p.end()
-            _pose_images[key] = image
-            # Keep memory bounded when switching projects or canvas resolutions.
-            while len(_pose_images) > 5:
-                _pose_images.pop(next(iter(_pose_images)))
-        _last_error.pop(str(path), None)
+            strength = float(movement.get('head_strength', 65)) / 100.
+            pose['ParamAngleY'] = float(layer.get('_movement_turn', 0)) * 30. * strength
+        # Snapshot mutable controls before crossing threads; workers never access
+        # project dictionaries or QWidget/QPixmap objects.
+        pose = tuple(sorted((str(k), round(float(v), 3)) for k, v in pose.items()))
+        payload = (int(w), int(h), pose)
+        # Separate instances of the same model can have independent head poses.
+        key = path, id(layer)
+        result, error = _pose_worker().request(key, payload, payload)
+        if error:
+            _last_error[path] = error
+            if path not in _errors:
+                print(f'Live2D layer unavailable ({path}): {error}', flush=True)
+                _errors.add(path)
+        else:
+            _last_error.pop(path, None)
+        if result is None:
+            return  # Initial model loading is also asynchronous.
+        image, bounds = result
+        layer['_movement_bounds'] = bounds
         painter.save()
         try:
-            painter.translate(w * float(layer.get('x', 0)) / 100, h * float(layer.get('y', 0)) / 100)
-            scale = max(0.01, float(layer.get('scale', 1)))
-            if movement.get('enabled', False):
-                far_y = float(movement.get('far_y', -35))
-                near_y = float(movement.get('near_y', 35))
-                y = float(layer.get('y', 0))
-                fraction = max(0., min(1., (y - far_y) / max(1., near_y - far_y)))
-                far_scale = float(movement.get('far_scale', 40)) / 100.
-                near_scale = float(movement.get('near_scale', 100)) / 100.
-                scale *= far_scale + (near_scale - far_scale) * fraction
+            painter.translate(w * float(layer.get('x', 0)) / 100,
+                              h * float(layer.get('y', 0)) / 100)
+            scale = (perspective_scale(layer, float(layer.get('y', 0)))
+                     if movement.get('enabled', False) else max(.01, float(layer.get('scale', 1))))
             painter.translate(w / 2, h / 2)
             painter.scale(scale, scale)
             painter.translate(-w / 2, -h / 2)
-            painter.setOpacity(max(0, min(1, float(layer.get('opacity', 100)) / 100)))
+            painter.setOpacity(max(0., min(1., float(layer.get('opacity', 100)) / 100)))
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            painter.drawImage(QRectF(0, 0, w, h), _pose_images[key])
+            painter.drawImage(QRectF(0, 0, w, h), image)
         finally:
             painter.restore()
     except Exception as exc:
-        _last_error[str(path)] = str(exc)
+        _last_error[path] = str(exc)
         if path not in _errors:
             print(f'Live2D layer unavailable ({path}): {exc}', flush=True)
             _errors.add(path)
