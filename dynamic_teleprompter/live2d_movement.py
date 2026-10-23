@@ -29,32 +29,79 @@ def _ease(value):
     return value * value * (3 - 2 * value)
 
 
+def perspective_scale(layer, y):
+    settings = {**DEFAULT_MOVEMENT, **layer.get('movement', {})}
+    far, near = sorted((float(settings['far_y']), float(settings['near_y'])))
+    fraction = max(0., min(1., (y - far) / max(1., near - far)))
+    depth = (float(settings['far_scale']) +
+             (float(settings['near_scale']) - float(settings['far_scale'])) * fraction)
+    return max(.01, float(layer.get('scale', 1))) * depth / 100.
+
+
+def _clamp_position(layer, settings, x, y):
+    # Bounds describe the visible mesh in normalized, untransformed image space.
+    # Until the worker returns geometry, the full image is a conservative bound.
+    left, top, right, bottom = layer.get('_movement_bounds', (0., 0., 1., 1.))
+    far, near = sorted((float(settings['far_y']), float(settings['near_y'])))
+    low, high = far, near
+    base = max(.01, float(layer.get('scale', 1)))
+    slope = base * (float(settings['near_scale']) - float(settings['far_scale'])) / (100 * max(1., near - far))
+    intercept = base * float(settings['far_scale']) / 100 - slope * far
+    # Perspective scale is linear within [far, near]. Solve both edge
+    # inequalities analytically, including when the depth scale is reversed.
+    for a, b in ((.01 + (top - .5) * slope, .5 + (top - .5) * intercept),
+                 (-.01 - (bottom - .5) * slope, .5 - (bottom - .5) * intercept)):
+        if abs(a) < 1e-12:
+            if b < 0:
+                low, high = 1., 0.
+                break
+        elif a > 0:
+            low = max(low, -b / a)
+        else:
+            high = min(high, -b / a)
+    if low <= high:
+        y = max(low, min(high, y))
+    else:
+        # An oversized model cannot fit. Center its visible geometry in the
+        # permitted depth range rather than alternating invalid min/max bounds.
+        center = (top + bottom) / 2 - .5
+        denominator = .01 + center * slope
+        centered = -center * intercept / denominator if abs(denominator) > 1e-12 else 0.
+        y = max(far, min(near, centered))
+    scale = perspective_scale(layer, y)
+    low_x = 100 * (-.5 - (left - .5) * scale)
+    high_x = 100 * (.5 - (right - .5) * scale)
+    x = max(low_x, min(high_x, x)) if low_x <= high_x else (low_x + high_x) / 2
+    return x, y
+
+
 def step_motion(layer, keys, dt):
     """Update movement for the active character; return True if visual state changed.
 
-    X movement speed follows head-turn amplitude. Upon release, both slow to zero
-    together. W/S use the same eased velocity profile but do not rotate the head.
+    X movement speed follows a virtual head-turn signal, independent of raster
+    completion. Release stops translation while the head smoothly recenters.
     """
     settings = {**DEFAULT_MOVEMENT, **layer.get('movement', {})}
-    if not settings['enabled'] or dt <= 0:
+    if not settings['enabled'] or not math.isfinite(dt) or dt <= 0:
         return False
+    dt = min(.033, dt)
     x_direction = int('d' in keys) - int('a' in keys)
     y_direction = int('s' in keys) - int('w' in keys)
-    # Normalize diagonals so W+D isn't faster than D alone.
-    divisor = math.sqrt(2) if x_direction and y_direction else 1.
-    x_direction /= divisor
-    y_direction /= divisor
     turn = float(layer.get('_movement_turn', 0.))
     vertical = float(layer.get('_movement_vertical', 0.))
     new_turn = _approach(turn, x_direction, dt, float(settings['turn_seconds']) / 1000.)
     new_vertical = _approach(vertical, y_direction, dt, float(settings['vertical_seconds']) / 1000.)
-    # Deceleration matches head return; retained velocity creates a small coast.
-    velocity_x = math.copysign(_ease(new_turn), new_turn) * float(settings['horizontal_speed'])
-    velocity_y = math.copysign(_ease(new_vertical), new_vertical) * float(settings['vertical_speed'])
+    # Gate translation on held input. During reversal, wait for the virtual
+    # angle to cross center instead of drifting against the requested direction.
+    vx = math.copysign(_ease(new_turn), new_turn) if x_direction * new_turn > 0 else 0.
+    vy = math.copysign(_ease(new_vertical), new_vertical) if y_direction * new_vertical > 0 else 0.
+    divisor = max(1., math.hypot(vx, vy))
+    velocity_x = vx / divisor * float(settings['horizontal_speed'])
+    velocity_y = vy / divisor * float(settings['vertical_speed'])
     old_x, old_y = float(layer.get('x', 0)), float(layer.get('y', 0))
-    far, near = float(settings['far_y']), float(settings['near_y'])
-    new_x = max(-100., min(100., old_x + velocity_x * dt))
-    new_y = max(far, min(near, old_y + velocity_y * dt))
+    new_x, new_y = old_x, old_y
+    if x_direction or y_direction:
+        new_x, new_y = _clamp_position(layer, settings, old_x + velocity_x * dt, old_y + velocity_y * dt)
     layer['_movement_turn'] = new_turn
     layer['_movement_vertical'] = new_vertical
     layer['x'] = new_x

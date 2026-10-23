@@ -1,6 +1,6 @@
 """Camera-free Live2D animation scheduler and non-blocking microphone level tap.
 
-All Cubism API calls remain on the Qt rendering thread. Audio callbacks only update
+All Cubism API calls remain on the pose worker thread. Audio callbacks only update
 one small shared meter, never render or access Qt widgets.
 """
 import math

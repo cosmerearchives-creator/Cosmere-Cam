@@ -42,7 +42,7 @@ from native_engine import chroma_key_inplace, color_adjust_inplace, backend_stat
 from spellchecker import SpellChecker
 
 APP_VERSION = 'v0.5.0-alpha16'
-APP_NEWS = ('New: WASD Live2D movement with head-turn-linked acceleration, soft stops and perspective depth scaling. '
+APP_NEWS = ('New: WASD Live2D movement with head-turn-linked acceleration, head recentering and perspective depth scaling. '
             'Model presets, camera-free blinking, breathing and lip sync remain available. '
             'Movement controls work while the Output Window or non-text controls are active.')
 
@@ -1107,7 +1107,7 @@ class VisualLayerEditor(QDialog):
         dialog.setWindowTitle('Live2D — WASD Movement & Perspective')
         layout = QVBoxLayout(dialog)
         intro = QLabel('W / S = move away / closer (scale changes). A / D = move left / right and turn head.\n'
-                       'Release = decelerate; character stays at its new position.\n'
+                       'Release = stop moving; head smoothly returns to center.\n'
                        'Keys work while Output or the non-text controls are focused.')
         intro.setWordWrap(True)
         layout.addWidget(intro)
