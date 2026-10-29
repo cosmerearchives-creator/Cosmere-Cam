@@ -51,6 +51,7 @@ class CanvasRecorder:
         self.error = None
         self.stopping = False
         self.finished = False
+        self.cancelled = False
         self._frames = queue.Queue(maxsize=12)
         self._audio_queue = queue.Queue(maxsize=256)
         self.audio_listener = None
@@ -98,6 +99,8 @@ class CanvasRecorder:
                 self._audio_file.setsampwidth(2)
                 self._audio_file.setframerate(self._audio_rate)
                 def callback(indata, frames, time_info, status):
+                    if self.cancelled:
+                        return
                     self.audio_samples += frames
                     try:
                         self._audio_queue.put_nowait(bytes(indata))
@@ -151,7 +154,7 @@ class CanvasRecorder:
 
     def _write_frames(self):
         try:
-            while True:
+            while not self.cancelled:
                 pixels = self._frames.get()
                 if pixels is None:
                     break
@@ -162,11 +165,12 @@ class CanvasRecorder:
                 self.encoder_write_total_ms += elapsed_ms
                 self.encoder_write_max_ms = max(self.encoder_write_max_ms, elapsed_ms)
         except Exception as exc:
-            self.error = 'Video writing failed: ' + str(exc)
+            if not self.cancelled:
+                self.error = 'Video writing failed: ' + str(exc)
 
     def _process_audio(self):
         """Continuous audio DSP off the PortAudio callback; playback receives same PCM."""
-        while True:
+        while not self.cancelled:
             try:
                 data = self._audio_queue.get(timeout=0.1)
             except queue.Empty:
@@ -274,16 +278,48 @@ class CanvasRecorder:
             self.finished = True
 
     def abort(self):
+        """Abandon capture without muxing, diagnostics, or touching the destination."""
+        self.cancelled = True
         self.stopping = True
         try:
             if self._stream is not None:
                 self._stream.stop()
                 self._stream.close()
-            if hasattr(self, '_audio_file'):
-                self._audio_file.close()
             if self._video is not None:
                 self._video.kill()
                 self._video.wait(timeout=5)
-        finally:
+            # Wake an idle writer; killing FFmpeg also releases a blocked pipe write.
+            while True:
+                try:
+                    self._frames.get_nowait()
+                except queue.Empty:
+                    break
+            self._frames.put_nowait(None)
+            for worker in (getattr(self, '_writer', None), self._audio_worker):
+                if worker is not None:
+                    worker.join(timeout=10)
+                    if worker.is_alive():
+                        raise RuntimeError('Recording worker did not stop; temporary files retained')
+            if hasattr(self, '_audio_file'):
+                self._audio_file.close()
             if self._temp is not None:
                 self._temp.cleanup()
+        finally:
+            self.finished = True
+
+    def discard_async(self):
+        """Choose discard only while capturing; Stop/Save owns finalization afterward."""
+        if self.stopping:
+            return False
+        self.cancelled = True
+        self.stopping = True
+        def discard():
+            try:
+                self.abort()
+            except Exception as exc:
+                self.error = 'Discard cleanup failed: ' + str(exc)
+                self.finished = True
+        threading.Thread(target=discard, daemon=True).start()
+        return True
+
+

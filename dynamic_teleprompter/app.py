@@ -41,10 +41,9 @@ from native_engine import chroma_key_inplace, color_adjust_inplace, backend_stat
 
 from spellchecker import SpellChecker
 
-APP_VERSION = 'v0.5.0-alpha16'
-APP_NEWS = ('New: WASD Live2D movement with head-turn-linked acceleration, soft stops and perspective depth scaling. '
-            'Model presets, camera-free blinking, breathing and lip sync remain available. '
-            'Movement controls work while the Output Window or non-text controls are active.')
+APP_VERSION = 'v0.5.0-alpha16.2'
+APP_NEWS = ('New: larger adjustable Reader text, smooth speech-progress scrolling, '
+            'and Discard Recording for bad takes without saving or processing.')
 
 DICTIONARY_PATH = Path.home() / '.dynamic_teleprompter_dictionary.json'
 DICTIONARY_NAME_PATH = Path.home() / '.dynamic_teleprompter_dictionary_name.json'
@@ -1741,11 +1740,25 @@ class ReaderWindow(QWidget):
         self.view.setUndoRedoEnabled(False)
         self.view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.view.setStyleSheet('QTextEdit {background: #10151E; color: #F2F5F8; border: 0; padding: 22px;}')
-        self.view.setFont(QFont('Arial', 25))
+        self.reader_settings = QSettings('Cosmere-Cam', 'Reader')
+        self.font_size_control = QSpinBox()
+        self.font_size_control.setRange(20, 96)
+        try:
+            size = int(self.reader_settings.value('font_size', 36))
+        except (TypeError, ValueError):
+            size = 36
+        self.font_size_control.setValue(size)
+        font_row = QHBoxLayout()
+        font_row.addWidget(QLabel('Reader text size:'))
+        font_row.addWidget(self.font_size_control)
+        layout.addLayout(font_row)
+        self.view.setFont(QFont('Arial', self.font_size_control.value()))
+        self.font_size_control.valueChanged.connect(self._set_font_size)
         layout.addWidget(self.view, 1)
         self.tokens = []
         self.position = -1
         self._scroll_goal = 0.0
+        self._scroll_position = 0.0
         self._target_offset = None
         self._last_tick = time.monotonic()
         self.scroll_timer = QTimer(self)
@@ -1757,6 +1770,7 @@ class ReaderWindow(QWidget):
         self.view.setPlainText(script)
         self.tokens = [(m.start(), m.end(), m.group()) for m in self.TOKEN_RE.finditer(script)]
         self.position = -1
+        self._scroll_goal = self._scroll_position = 0.0
         self.view.verticalScrollBar().setValue(0)
         self.set_progress(0, force=True)
 
@@ -1787,30 +1801,50 @@ class ReaderWindow(QWidget):
         self.view.setExtraSelections([selection])
         # cursorRect is viewport-relative. Add current offset to find its
         # absolute scroll coordinate, then put the next word 35% down the view.
-        scrollbar = self.view.verticalScrollBar()
+        self._update_scroll_goal()
+
+    def _set_font_size(self, size):
+        self.view.setFont(QFont('Arial', size))
+        self.reader_settings.setValue('font_size', size)
+        self._update_scroll_goal()
+
+    def _update_scroll_goal(self):
+        if not 0 <= self.position < len(self.tokens):
+            return
+        cursor = QTextCursor(self.view.document())
+        cursor.setPosition(self.tokens[self.position][0])
         rect = self.view.cursorRect(cursor)
-        self._scroll_goal = max(0, min(scrollbar.maximum(),
-            scrollbar.value() + rect.top() - round(self.view.viewport().height() * .35)))
+        block = cursor.block()
+        offset = cursor.positionInBlock()
+        line = block.layout().lineForTextPosition(offset)
+        # Spread each visual line's travel across its words, instead of waiting
+        # for recognition to cross a line break before moving the entire line.
+        fraction = 0.0
+        if line.isValid():
+            fraction = (offset - line.textStart()) / max(1, line.textLength())
+        bar = self.view.verticalScrollBar()
+        self._scroll_goal = max(0, min(bar.maximum(), bar.value() + rect.top()
+            + rect.height() * fraction - self.view.viewport().height() * .35))
 
     def _animate_scroll(self):
+        now = time.monotonic()
+        dt = min(.075, max(0, now - self._last_tick))
+        self._last_tick = now
+        self._update_scroll_goal()
         bar = self.view.verticalScrollBar()
         if self._scroll_goal > bar.maximum():
             self._scroll_goal = bar.maximum()
-        current = bar.value()
+        current = self._scroll_position
         distance = self._scroll_goal - current
         if abs(distance) < 1:
             if current != round(self._scroll_goal):
                 bar.setValue(round(self._scroll_goal))
             return
         # Time-based eased interpolation, independent of screen refresh rate.
-        now = time.monotonic()
-        dt = min(.075, max(.001, now - self._last_tick))
-        self._last_tick = now
         fraction = 1 - math.exp(-dt * 7.5)
         step = distance * fraction
-        if abs(step) < 1:
-            step = 1 if distance > 0 else -1
-        bar.setValue(round(current + step))
+        self._scroll_position = current + step
+        bar.setValue(round(self._scroll_position))
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2474,6 +2508,7 @@ class MainWindow(QMainWindow):
             self.canvas_resolution.setEnabled(False)
             self.canvas_fps.setEnabled(False)
             self.record_toggle.setText('■ Stop Canvas Recording')
+            self.record_discard.setEnabled(True)
             self.record_status.setText('Recording: ' + str(filename))
             self.record_timer.start(10)
             self._capture_record_frame()
@@ -2516,8 +2551,9 @@ class MainWindow(QMainWindow):
             self._stop_recording()
 
     def _stop_recording(self):
-        if self.recorder is None:
+        if self.recorder is None or self.recorder.stopping:
             return
+        self.record_discard.setEnabled(False)
         self.record_timer.stop()
         if self.audio_monitor is not None:
             self._stop_monitor(keep_checkbox=True)
@@ -2526,12 +2562,36 @@ class MainWindow(QMainWindow):
         self.recorder.finish_async()
         self.record_finish_timer.start()
 
+    def _discard_recording(self):
+        recorder = self.recorder
+        if recorder is None or recorder.stopping:
+            return
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle('Discard this recording?')
+        dialog.setText('Permanently discard this take without saving or processing it?')
+        dialog.setStandardButtons(QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        dialog.setEscapeButton(QMessageBox.StandardButton.Cancel)
+        if dialog.exec() != QMessageBox.StandardButton.Discard:
+            return
+        if self.recorder is not recorder or recorder.stopping:
+            return
+        self.record_timer.stop()
+        self.record_toggle.setEnabled(False)
+        self.record_discard.setEnabled(False)
+        recorder.discard_async()
+        if self.audio_monitor is not None:
+            self._stop_monitor(keep_checkbox=True)
+        self.record_status.setText('Discarding take…')
+        self.record_finish_timer.start()
+
     def _record_finished(self):
         recorder = self.recorder
         if recorder is None or not recorder.finished:
             return
         self.record_finish_timer.stop()
         self.recorder = None
+        self.record_discard.setEnabled(False)
         self.record_toggle.setEnabled(True)
         self.record_toggle.setText('● Start Canvas Recording')
         self.record_microphone.setEnabled(True)
@@ -2542,6 +2602,8 @@ class MainWindow(QMainWindow):
         if recorder.error:
             self.record_status.setText('Recording failed: ' + recorder.error)
             QMessageBox.warning(self, 'Recording failed', recorder.error)
+        elif recorder.cancelled:
+            self.record_status.setText('Take discarded. Ready to record again.')
         else:
             self.record_status.setText('Saved: %s (%d frames, %d late)' %
                                        (recorder.path, recorder.frame_count, recorder.late_frames))
@@ -2858,6 +2920,10 @@ class MainWindow(QMainWindow):
         self.record_toggle = QPushButton('● Start Canvas Recording')
         self.record_toggle.clicked.connect(self._toggle_recording)
         record_form.addRow('Recorder:', self.record_toggle)
+        self.record_discard = QPushButton('Discard Recording…')
+        self.record_discard.setEnabled(False)
+        self.record_discard.clicked.connect(self._discard_recording)
+        record_form.addRow('Bad take:', self.record_discard)
         self.record_status = QLabel('Ready — FFmpeg required. Save as MP4 (H.264 + optional AAC audio).')
         self.record_status.setWordWrap(True)
         record_form.addRow('Status:', self.record_status)
@@ -4426,3 +4492,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
