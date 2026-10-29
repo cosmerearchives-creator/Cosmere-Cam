@@ -114,6 +114,31 @@ class DiscardTests(unittest.TestCase):
             self.assertFalse(r.discard_async())
             self.assertFalse(r.cancelled)
 
+    def test_cleanup_continues_after_stream_failure_and_reports_error(self):
+        r = CanvasRecorder('unused.mp4', 2, 2, 30, microphone=False)
+        r._stream = Mock()
+        r._stream.stop.side_effect = RuntimeError('device disconnected')
+        r._video = Mock()
+        r._temp = Mock()
+        r.discard_async()
+        deadline = time.monotonic() + 2
+        while not r.finished and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue(r.finished)
+        self.assertIn('device disconnected', r.error)
+        r._stream.close.assert_called_once()
+        r._video.kill.assert_called_once()
+        r._temp.cleanup.assert_called_once()
+
+    def test_live_audio_worker_joins_before_file_closes(self):
+        r = CanvasRecorder('unused.mp4', 2, 2, 30, microphone=False)
+        r._audio_file = Mock()
+        r._audio_worker = threading.Thread(target=r._process_audio)
+        r._audio_worker.start()
+        r.abort()
+        self.assertFalse(r._audio_worker.is_alive())
+        r._audio_file.close.assert_called_once()
+
     def test_ui_decline_keeps_capture_running(self):
         ui = Mock()
         ui.recorder.stopping = False
