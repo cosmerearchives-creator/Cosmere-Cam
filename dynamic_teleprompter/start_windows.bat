@@ -14,6 +14,8 @@ if not exist "%SETUP_MARKER%" (
   if not exist "%STATE_DIR%" mkdir "%STATE_DIR%"
   > "%SETUP_MARKER%" echo Setup completed
 )
-py -3 app.py
+py -3 app_entry.py
 if errorlevel 1 echo Application exited with an error. See messages above.
 pause
+
+

@@ -40,10 +40,11 @@ import numpy as np
 from native_engine import chroma_key_inplace, color_adjust_inplace, backend_status
 
 from spellchecker import SpellChecker
+from version import VERSION, RELEASE_NOTES
+from update_ui import Updates
 
-APP_VERSION = 'v0.5.0-alpha16.2'
-APP_NEWS = ('New: larger adjustable Reader text, smooth speech-progress scrolling, '
-            'and Discard Recording for bad takes without saving or processing.')
+APP_VERSION = 'v' + VERSION
+APP_NEWS = RELEASE_NOTES
 
 DICTIONARY_PATH = Path.home() / '.dynamic_teleprompter_dictionary.json'
 DICTIONARY_NAME_PATH = Path.home() / '.dynamic_teleprompter_dictionary_name.json'
@@ -506,6 +507,19 @@ class ContinuousVideoDecoder:
         probe = Path(self.ffmpeg).with_name('ffprobe.exe' if Path(self.ffmpeg).suffix.lower() == '.exe' else 'ffprobe')
         probe_exe = str(probe) if probe.is_file() else shutil.which('ffprobe')
         if not probe_exe:
+            # Self-contained builds include FFmpeg through imageio, without a
+            # separate ffprobe. Preserve portrait/square layer geometry and FPS.
+            try:
+                import imageio_ffmpeg
+                reader = imageio_ffmpeg.read_frames(self.path)
+                try:
+                    metadata = next(reader)
+                finally:
+                    reader.close()
+                width, height = metadata['source_size']
+                return (max(1, min(60, float(metadata.get('fps') or 30))), int(width), int(height))
+            except (ImportError, OSError, RuntimeError, ValueError, KeyError, StopIteration):
+                pass
             return (30.0, 1280, 720)
         try:
             import fractions
@@ -3240,6 +3254,8 @@ class MainWindow(QMainWindow):
         settings_home_layout.addWidget(save_display)
         settings_home_layout.addStretch()
         tabs.addTab(self._scroll_page(settings_home), 'Settings')
+        self.updates = Updates(self)
+        tabs.addTab(self.updates.page, 'Updates')
         self.build_menus()
 
         status = QHBoxLayout()
@@ -4480,6 +4496,10 @@ class MainWindow(QMainWindow):
         VIDEO_FRAMES.shutdown()
         self.out.close()
         self.reader.close()
+        try:
+            self.updates.on_clean_close()
+        except OSError as error:
+            QMessageBox.warning(self, 'Update deferred', 'The update could not start. Restart the launcher to retry. ' + str(error))
         super().closeEvent(event)
 
 

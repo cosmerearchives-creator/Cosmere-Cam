@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import wave
+import sys
 from pathlib import Path
 
 from PySide6.QtGui import QImage
@@ -24,12 +25,17 @@ from audio_diagnostics import snapshot as audio_diagnostics_snapshot
 def resolve_ffmpeg(configured=''):
     """Locate FFmpeg: explicitly configured executable, next to app, bin/, then PATH."""
     app_dir = Path(__file__).resolve().parent
-    candidates = [configured, app_dir / 'ffmpeg.exe', app_dir / 'ffmpeg',
+    candidates = [configured, Path(sys.executable).parent / 'ffmpeg.exe', app_dir / 'ffmpeg.exe', app_dir / 'ffmpeg',
                   app_dir / 'bin' / 'ffmpeg.exe', app_dir / 'bin' / 'ffmpeg',
                   shutil.which('ffmpeg')]
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
             return str(Path(candidate).resolve())
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except (ImportError, RuntimeError):
+        pass
     return None
 
 
@@ -203,7 +209,7 @@ class CanvasRecorder:
         elapsed = self.elapsed() if hasattr(self, '_started') else 0.0
         audio_seconds = self.audio_samples / self._audio_rate if self.microphone and hasattr(self, '_audio_rate') else None
         return {
-            'app_release': '0.5.0-alpha5', 'output': self.path.name,
+            'app_release': __import__('version').VERSION, 'output': self.path.name,
             'resolution': [self.width, self.height], 'target_fps': self.fps,
             'wall_clock_seconds': round(elapsed, 3),
             'video_duration_seconds': round(self.frame_count / self.fps, 3),
@@ -312,7 +318,12 @@ class CanvasRecorder:
             if self._video is not None:
                 for pipe in (self._video.stdin, self._video.stderr):
                     if pipe is not None:
-                        attempt(pipe.close)
+                        try:
+                            pipe.close()
+                        except (OSError, ValueError):
+                            # FFmpeg was deliberately killed; closing a broken
+                            # buffered input pipe is expected during discard.
+                            pass
             if self._temp is not None:
                 attempt(self._temp.cleanup)
         if errors:

@@ -3,3 +3,7 @@ pyspellchecker>=0.8,<1
 vosk>=0.3.45,<1
 sounddevice>=0.4.7,<1
 numpy>=2.2,<3
+keyring>=25,<27
+imageio-ffmpeg>=0.6,<1
+
+
