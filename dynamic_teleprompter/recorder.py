@@ -318,7 +318,12 @@ class CanvasRecorder:
             if self._video is not None:
                 for pipe in (self._video.stdin, self._video.stderr):
                     if pipe is not None:
-                        attempt(pipe.close)
+                        try:
+                            pipe.close()
+                        except (OSError, ValueError):
+                            # FFmpeg was deliberately killed; closing a broken
+                            # buffered input pipe is expected during discard.
+                            pass
             if self._temp is not None:
                 attempt(self._temp.cleanup)
         if errors:

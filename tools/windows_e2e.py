@@ -31,7 +31,7 @@ def smoke(root, env):
     env = dict(env, COSMERE_SMOKE_REPORT=str(report))
     run([root / 'CosmereCamLauncher.exe', '--root', root, '--smoke-test'], env)
     data = read_json(report)
-    assert data['version'] == VERSION and data['qt'] and data['ffmpeg'] and data['discard'], data
+    assert data['version'] == VERSION and data['qt'] and data['ffmpeg'] and data['discard'] and data['save'], data
     assert not (root / 'transaction.json').exists()
     return data
 
@@ -101,7 +101,7 @@ def main():
         meta['files']['CosmereCam.exe'] = hashlib.sha256(broken_bytes).hexdigest()
         with zipfile.ZipFile(broken, 'w', zipfile.ZIP_DEFLATED) as archive:
             for path in source.rglob('*'):
-                if path.is_file() and path.name != 'package.json':
+                if path.is_file() and path != source / 'package.json':
                     name = path.relative_to(source).as_posix()
                     archive.writestr(name, broken_bytes if name == 'CosmereCam.exe' else path.read_bytes())
             archive.writestr('package.json', json.dumps(meta))

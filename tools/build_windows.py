@@ -57,7 +57,7 @@ def build():
                 if source.is_file() and source.stat().st_size < 2_000_000:
                     shutil.copyfile(source, destination / (hashlib.sha256(str(file).encode()).hexdigest()[:8] + '-' + source.name))
     files = {p.relative_to(payload).as_posix(): sha256(p)
-             for p in payload.rglob('*') if p.is_file() and p.name != 'package.json'}
+             for p in payload.rglob('*') if p.is_file() and p != payload / 'package.json'}
     for name in files:
         lower = name.lower()
         if any(item in lower for item in ('live2dcubismcore', 'cubismsdkfornative', '.moc3', '.model3.json', '.vst3')):
