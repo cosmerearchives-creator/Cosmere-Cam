@@ -52,6 +52,8 @@ atomically after extraction succeeds. The stable protocol-v1 launcher is not ove
 by routine updates. `transaction.json` preserves the prior pointer until the new Qt app
 acknowledges startup. An interrupted first boot rolls back on the next launch; a failed
 startup rolls back immediately. The OS-released launcher lock covers the whole app life.
+If startup times out while the process is still alive, the launcher restores the old
+pointer for the next launch and waits for natural exit; it never kills a possible capture.
 Downloads use `.part` files, delete incomplete transfers and retry from zero. Settings
 and user content are never inside version folders. Old versions are retained for recovery;
 automatic pruning is deliberately deferred. Re-running setup repairs a damaged version

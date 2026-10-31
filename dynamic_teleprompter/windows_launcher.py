@@ -88,8 +88,12 @@ def launch(root, smoke=False, timeout=60):
         (root / 'transaction.json').unlink(missing_ok=True)
         return process.wait()
     if process.poll() is None:
-        process.terminate()
-        process.wait(timeout=10)
+        # An unresponsive startup might already be capturing. Never kill a
+        # running application to install/recover an update. Restore the pointer
+        # for next launch and retain the lock until this process exits naturally.
+        if transaction:
+            recover(root)
+        return process.wait()
     if transaction:
         recover(root)
         previous = read_json(root / 'active.json')

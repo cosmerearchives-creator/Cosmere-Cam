@@ -75,7 +75,7 @@ def run():
             if report:
                 atomic_json(report, {'error': str(error)})
             application.exit(1)
-    QTimer.singleShot(1000, ready)
+    QTimer.singleShot(0, ready)
     return application.exec()
 
 

@@ -272,6 +272,9 @@ def deploy(root, pending):
     """Caller holds install_lock and no app is running. Pointer swap is the commit."""
     root = Path(root)
     version_key(pending['version'])
+    current = read_json(root / 'active.json')
+    if current and version_key(pending['version']) < version_key(current['version']):
+        raise UpdateError('Refused to downgrade the installed application')
     if not re.fullmatch('[a-f0-9]{64}', pending['sha256']):
         raise UpdateError('Invalid package digest')
     name = pending['version'] + '-' + pending['sha256'][:16]

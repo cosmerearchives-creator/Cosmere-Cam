@@ -111,6 +111,26 @@ class DeploymentTests(unittest.TestCase):
                 with core.install_lock(self.root):
                     self.fail('Second instance acquired lock')
 
+    def test_stale_source_checkout_cannot_downgrade_managed_install(self):
+        core.deploy(self.root, self.new)
+        with self.assertRaises(core.UpdateError):
+            core.deploy(self.root, self.old)
+
+    def test_health_timeout_never_kills_a_running_capture(self):
+        import windows_launcher
+        previous = core.deploy(self.root, self.old)
+        (self.root / 'transaction.json').unlink()
+        core.deploy(self.root, self.new)
+        process = Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        with patch('windows_launcher.subprocess.Popen', return_value=process), \
+                patch('windows_launcher.time.monotonic', side_effect=[0, 61]):
+            windows_launcher.launch(self.root)
+        process.terminate.assert_not_called()
+        process.kill.assert_not_called()
+        self.assertEqual(core.read_json(self.root / 'active.json'), previous)
+
 
 class DownloadTests(unittest.TestCase):
     def asset(self, data):
