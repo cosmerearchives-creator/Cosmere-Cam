@@ -15,3 +15,19 @@ Reproduce the movement bug with deterministic time-stepped tests. Profile Qt eve
 
 ## Deliverables
 Short change summary, relevant tests and results, risks, and where the Windows test artifact is available. Prefer a PR for substantive changes.
+
+## Standing release policy
+Completed and adequately tested updates must be merged into main and published by default.
+Use Implement → Test → Merge to main → Build → Publish release → Verify update detection.
+A PR alone is not completion. Do not leave completed work in an open PR unless the user
+explicitly asks to hold it. If the user says not to push an update to main, first ask
+them to confirm that they intend to hold it back. Never bypass failing tests, release
+verification, security checks or unresolved critical defects to satisfy this policy.
+Report blockers and fix them wherever feasible. Bump dynamic_teleprompter/version.py for
+each release; main pushes run the Windows build/release workflow automatically.
+Keep updater protocol v1 compatible with installed stable launchers. Do not overwrite
+the stable launcher during routine updates or remove the last known-good version.
+All private/recorded/licensed data stays outside distributables. Report automated and
+manual hardware/model tests separately; never claim end-to-end updates without evidence.
+
+
