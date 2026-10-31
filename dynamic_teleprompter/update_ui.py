@@ -5,7 +5,7 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer, Signal, Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QPushButton,
                              QProgressBar, QInputDialog, QLineEdit)
 from update_core import (GitHub, find_update, stage_update, read_json, install_root)
@@ -53,9 +53,11 @@ class Updates(QObject):
         layout = QVBoxLayout(self.page)
         layout.addWidget(QLabel('Installed version: ' + VERSION))
         notes = QLabel(RELEASE_NOTES)
+        notes.setTextFormat(Qt.TextFormat.PlainText)
         notes.setWordWrap(True)
         layout.addWidget(notes)
         self.status = QLabel('Checks run at launch and every 6 hours. Updates apply after closing.')
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.bar = QProgressBar()
@@ -156,7 +158,8 @@ class Updates(QObject):
         self.restart_requested = True
         # Existing closeEvent retains the unsaved-project prompt. Cancellation
         # leaves the app open; no installer runs until an accepted close.
-        self.window.close()
+        if not self.window.close():
+            self.restart_requested = False
 
     def on_clean_close(self):
         self.closing = True

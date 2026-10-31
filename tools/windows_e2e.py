@@ -120,6 +120,33 @@ def main():
         # Frozen app starts with all internet access unavailable; test mode suppresses
         # checker and source unit tests exercise network errors explicitly.
         results['offline_frozen_start'] = smoke(root, dict(environment, HTTPS_PROXY='http://127.0.0.1:9'))
+        if args.published:
+            # Run the real Qt controller's automatic startup timer, background
+            # download and critical-operation gate against the published release.
+            controller_root = base / 'controller-install'
+            report = controller_root / 'restarted-app.json'
+            probe_env = dict(environment, COSMERE_SMOKE_REPORT=str(report))
+            run([sys.executable, ROOT / 'tools/controller_probe.py', controller_root], probe_env)
+            import time
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline and not report.exists():
+                time.sleep(.2)
+            assert read_json(report, {}).get('version') == VERSION, read_json(report)
+            # Ensure the relaunched process and launcher have exited before Temp cleanup.
+            while (controller_root / 'transaction.json').exists() and time.monotonic() < deadline:
+                time.sleep(.2)
+            time.sleep(2)
+            results['automatic_controller'] = read_json(controller_root / 'controller-verification.json')
+            assert results['automatic_controller']['download_progress']
+            # Exercise Windows Credential Manager without using/persisting a real token.
+            from update_ui import credential_store
+            vault = credential_store()
+            vault.set_password('Cosmere-Cam CI fixture', 'test', 'non-secret-fixture')
+            try:
+                assert vault.get_password('Cosmere-Cam CI fixture', 'test') == 'non-secret-fixture'
+                results['windows_credential_store'] = True
+            finally:
+                vault.delete_password('Cosmere-Cam CI fixture', 'test')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(results, indent=2), encoding='utf-8')
     print(json.dumps(results, indent=2))

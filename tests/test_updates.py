@@ -209,3 +209,16 @@ class BusyTests(unittest.TestCase):
         ui.downloaded.emit.assert_not_called()
         self.assertTrue(ui.completed.emit.called)
 
+    def test_cancelled_project_close_does_not_schedule_restart(self):
+        ui = Mock()
+        ui.window = self.window()
+        ui.window.close.return_value = False
+        Updates.restart(ui)
+        self.assertFalse(ui.restart_requested)
+
+    def test_incomplete_pending_json_does_not_break_launch(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'pending.json'
+            path.write_text('{incomplete')
+            self.assertIsNone(core.read_json(path))
+

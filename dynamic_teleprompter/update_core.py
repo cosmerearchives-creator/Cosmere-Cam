@@ -61,7 +61,7 @@ def atomic_json(path, data):
 def read_json(path, default=None):
     try:
         return json.loads(Path(path).read_text(encoding='utf-8'))
-    except FileNotFoundError:
+    except (OSError, ValueError):
         return default
 
 
