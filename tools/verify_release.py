@@ -10,9 +10,19 @@ from update_core import GitHub, API, PACKAGE_NAME, MANIFEST_NAME, sha256, digest
 from version import VERSION
 
 
+def release_for_version(client, version):
+    # GitHub's by-tag endpoint can return 404 for an unpublished draft whose
+    # tag is not created yet. The authenticated collection includes those drafts.
+    releases = client.json(API + '/releases?per_page=30')
+    matches = [release for release in releases if release.get('tag_name') == 'v' + version]
+    if len(matches) != 1:
+        raise RuntimeError('Expected one uploaded release for v' + version)
+    return matches[0]
+
+
 def main():
     client = GitHub(os.environ['GH_TOKEN'])
-    release = client.json(API + '/releases/tags/v' + VERSION)
+    release = release_for_version(client, VERSION)
     assets = {a['name']: a for a in release['assets']}
     with tempfile.TemporaryDirectory() as folder:
         for name in ('Cosmere-Cam-Setup.exe', PACKAGE_NAME, MANIFEST_NAME):

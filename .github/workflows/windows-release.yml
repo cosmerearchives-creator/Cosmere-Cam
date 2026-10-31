@@ -75,8 +75,14 @@ jobs:
           $existing = gh release view $tag --json isDraft 2>$null
           if ($LASTEXITCODE -eq 0) {
             if (($existing | ConvertFrom-Json).isDraft) {
-              gh release delete $tag --yes --cleanup-tag
+              gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tag" --silent 2>$null
+              $tagExists = $LASTEXITCODE -eq 0
+              gh release delete $tag --yes
               if ($LASTEXITCODE) { exit $LASTEXITCODE }
+              if ($tagExists) {
+                gh api "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$tag" --method DELETE
+                if ($LASTEXITCODE) { exit $LASTEXITCODE }
+              }
             } else {
               "created=false" >> $env:GITHUB_OUTPUT
               exit 0
