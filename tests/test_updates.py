@@ -8,6 +8,7 @@ import threading
 import unittest
 import urllib.request
 import zipfile
+import types
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -191,6 +192,20 @@ class DownloadTests(unittest.TestCase):
             client.opener.open.return_value = io.BytesIO(raw.replace(b'alpha17', b'alpha18'))
             with self.assertRaises(core.UpdateError):
                 core.find_update(client, '0.5.0-alpha16.2')
+
+    def test_video_geometry_without_external_ffprobe(self):
+        from app import ContinuousVideoDecoder
+        closed = threading.Event()
+        def frames(path):
+            try:
+                yield {'source_size': (540, 960), 'fps': 25}
+            finally:
+                closed.set()
+        decoder = Mock(ffmpeg='missing-ffmpeg.exe', path='portrait.mp4')
+        module = types.SimpleNamespace(read_frames=frames)
+        with patch.dict(sys.modules, imageio_ffmpeg=module), patch('app.shutil.which', return_value=None):
+            self.assertEqual(ContinuousVideoDecoder._metadata(decoder), (25, 540, 960))
+        self.assertTrue(closed.is_set())
 
 
 class BusyTests(unittest.TestCase):

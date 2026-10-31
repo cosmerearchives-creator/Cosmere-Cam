@@ -507,6 +507,19 @@ class ContinuousVideoDecoder:
         probe = Path(self.ffmpeg).with_name('ffprobe.exe' if Path(self.ffmpeg).suffix.lower() == '.exe' else 'ffprobe')
         probe_exe = str(probe) if probe.is_file() else shutil.which('ffprobe')
         if not probe_exe:
+            # Self-contained builds include FFmpeg through imageio, without a
+            # separate ffprobe. Preserve portrait/square layer geometry and FPS.
+            try:
+                import imageio_ffmpeg
+                reader = imageio_ffmpeg.read_frames(self.path)
+                try:
+                    metadata = next(reader)
+                finally:
+                    reader.close()
+                width, height = metadata['source_size']
+                return (max(1, min(60, float(metadata.get('fps') or 30))), int(width), int(height))
+            except (ImportError, OSError, RuntimeError, ValueError, KeyError, StopIteration):
+                pass
             return (30.0, 1280, 720)
         try:
             import fractions

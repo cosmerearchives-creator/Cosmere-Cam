@@ -47,8 +47,10 @@ def run():
                 if not recorder.finished or recorder.error or path.exists():
                     raise RuntimeError('Frozen recording discard failed')
                 saved = Path(directory) / 'saved.mp4'
-                recorder = CanvasRecorder(saved, 64, 64, 30, microphone=False)
+                recorder = CanvasRecorder(saved, 48, 64, 30, microphone=False)
                 recorder.start()
+                image = QImage(48, 64, QImage.Format.Format_RGBA8888)
+                image.fill(0)
                 recorder.push_frame(image)
                 recorder.finish_async()
                 deadline = time.monotonic() + 20
@@ -59,6 +61,12 @@ def run():
                 import subprocess
                 subprocess.run([resolve_ffmpeg(), '-v', 'error', '-i', str(saved), '-f', 'null', '-'],
                                check=True, capture_output=True, timeout=10)
+                from app import ContinuousVideoDecoder
+                decoder = ContinuousVideoDecoder.__new__(ContinuousVideoDecoder)
+                decoder.path, decoder.ffmpeg = str(saved), resolve_ffmpeg()
+                fps, width, height = decoder._metadata()
+                if (width, height) != (48, 64):
+                    raise RuntimeError('Video layer metadata lost portrait geometry')
             report = os.environ.get('COSMERE_SMOKE_REPORT')
             if report:
                 atomic_json(report, {'version': VERSION, 'qt': True, 'ffmpeg': bool(resolve_ffmpeg()),
