@@ -48,7 +48,9 @@ def build():
             continue
         destination = license_dir / name
         destination.mkdir(exist_ok=True)
-        (destination / 'METADATA.txt').write_text(str(distribution.metadata), encoding='utf-8')
+        (destination / 'METADATA.txt').write_text(
+            distribution.read_text('METADATA') or distribution.read_text('PKG-INFO') or
+            (name + ' ' + distribution.version), encoding='utf-8')
         for file in distribution.files or []:
             if any(word in str(file).lower() for word in ('license', 'copying', 'notice')):
                 source = distribution.locate_file(file)
