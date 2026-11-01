@@ -25,7 +25,7 @@ def build():
     out.mkdir(exist_ok=True)
     (ROOT / 'build').mkdir(exist_ok=True)
     version_info = ROOT / 'build/suite-version.txt'
-    version_info.write_text("VSVersionInfo(ffi=FixedFileInfo(filevers=(0,5,0,18), prodvers=(0,5,0,18), "
+    version_info.write_text("VSVersionInfo(ffi=FixedFileInfo(filevers=(0,5,0,19), prodvers=(0,5,0,19), "
         "mask=0x3f, flags=0x2, OS=0x40004, fileType=0x1, subtype=0, date=(0,0)), "
         "kids=[StringFileInfo([StringTable('040904B0', [StringStruct('CompanyName', 'Cosmere Archives'), "
         "StringStruct('FileDescription', '" + APP_NAME + "'), StringStruct('ProductName', '" + APP_NAME + "'), "
@@ -87,7 +87,7 @@ def build():
         '\n\nDownload **Cosmere-Video-Recording-Suite-Setup.exe** and run it as your normal Windows user. '
         'No Python, administrator rights, or GitHub token needed for public updates. '
         'Alpha17 users who never connected release access need this installer once to enable token-free updates. '
-        'Install ReaPlugs 2.36 x64 separately from https://www.reaper.fm/reaplugs/, then add the desired DLLs under Output → Recording → Add ReaPlugs / VST2. '
+        'Install ReaPlugs 2.36 x64 separately from https://www.reaper.fm/reaplugs/, then add the desired DLLs under Output â†’ Recording â†’ Add ReaPlugs / VST2. '
         'ReaEQ, ReaComp, ReaGate and ReaFIR voice processing are verified. MIDI routing, external sidechains, surround output and 32-bit plugins are outside this release. '
         'Licensed Cubism Core and models also remain separate. The standalone native host is GPL-3.0-or-later; its complete corresponding source is included in the source archive.\n', encoding='utf-8')
     # Installer pins the embedded payload digest at build time. No network or Python setup.

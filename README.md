@@ -23,6 +23,6 @@ See [AGENTS.md](AGENTS.md) for development guidance.
 
 ## ReaPlugs voice effects
 
-Install the official ReaPlugs 2.36 **x64** separately, then use Output → Recording → Add ReaPlugs / VST2. Plugin controls opens the original editor. Ordered instances, bypass and complete plugin state (including learned ReaFIR noise curves) are saved with projects/settings. Tune before recording. This is a mono voice path; MIDI, instruments, external sidechains, surround and 32-bit plugins are outside this release. Plugin failures bypass the effect.
+Install the official ReaPlugs 2.36 **x64** separately, then use Microphone → Recording → Add ReaPlugs / VST2. Plugin controls opens the original editor. Ordered instances, bypass and complete plugin state (including learned ReaFIR noise curves) are saved with projects/settings. Tune before recording. This is a mono voice path; MIDI, instruments, external sidechains, surround and 32-bit plugins are outside this release. Plugin failures bypass the effect.
 
 The separate native VST2 helper uses the independently reverse-engineered FST ABI under GPL-3.0-or-later. See dynamic_teleprompter/native/vst2 for license, provenance and complete source. No vendor plugin binaries are distributed.
