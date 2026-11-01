@@ -2688,6 +2688,12 @@ class MainWindow(QMainWindow):
             else:
                 target.addRow(field)
 
+    def _toggle_quick_listening(self):
+        self.toggle_listening()
+        # Model/device errors can reject startup; reflect actual capture state.
+        self.quick_listen_button.setChecked(
+            self.voice_worker is not None and self.voice_worker.isRunning())
+
     def _set_recording_button(self, recording):
         caption = 'Stop / Save' if recording else 'Start\nRecording'
         self.record_caption.setText(caption)
@@ -2777,7 +2783,7 @@ class MainWindow(QMainWindow):
         self.progress.setFixedHeight(42)
         bottom.addWidget(self.progress, 0, Qt.AlignmentFlag.AlignTop)
         self.quick_listen_button, _ = toolbar_control('Voice\nTracking',
-            QStyle.StandardPixmap.SP_MediaVolume, self.toggle_listening)
+            QStyle.StandardPixmap.SP_MediaVolume, self._toggle_quick_listening)
         self.quick_listen_button.setCheckable(True)
         self.quick_listen_button.setToolTip('Start voice following')
         self.mic_indicator = QLabel('Stopped')
@@ -4669,4 +4675,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
