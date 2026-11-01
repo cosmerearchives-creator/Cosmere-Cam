@@ -33,15 +33,16 @@ from PySide6.QtWidgets import (
     QFileDialog, QFontComboBox, QFormLayout, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSpinBox, QSplitter, QTabWidget, QTextEdit, QVBoxLayout,
-    QWidget, QLineEdit, QSlider, QGraphicsOpacityEffect, QProgressBar, QFrame, QMenu, QListWidget, QListWidgetItem, QDialog, QInputDialog
+    QWidget, QLineEdit, QSlider, QGraphicsOpacityEffect, QProgressBar, QFrame, QMenu, QListWidget, QListWidgetItem, QDialog, QInputDialog, QStyle
 )
 
 import numpy as np
 from native_engine import chroma_key_inplace, color_adjust_inplace, backend_status
 
 from spellchecker import SpellChecker
-from version import VERSION, RELEASE_NOTES
+from version import VERSION, RELEASE_NOTES, APP_NAME
 from update_ui import Updates
+from plugin_ui import PluginController
 
 APP_VERSION = 'v' + VERSION
 APP_NEWS = RELEASE_NOTES
@@ -866,7 +867,7 @@ class VisualLayerEditor(QDialog):
     def __init__(self, main):
         super().__init__(main)
         self.main = main
-        self.setWindowTitle('Visual Layer Editor — Dynamic Teleprompter')
+        self.setWindowTitle('Visual Layers — ' + APP_NAME)
         self.resize(950, 600)
         outer = QVBoxLayout(self)
         self.hint = QLabel('Top of list = foreground. Move media above Text Output to overlay text.\nLive2D: use Idle Animation for automatic blinking, breathing, and microphone lip sync (no camera required).')
@@ -1364,7 +1365,7 @@ class VisualLayerEditor(QDialog):
 class CanvasScene(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Dynamic Teleprompter — Output')
+        self.setWindowTitle(APP_NAME + ' — Output')
         self.resize(850, 440)
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(24, 24, 24, 24)
@@ -1473,7 +1474,7 @@ class OutputWindow(QWidget):
     """
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Dynamic Teleprompter — Output')
+        self.setWindowTitle(APP_NAME + ' — Output')
         self.resize(850, 440)
         self.scene = CanvasScene()
         self.scene.setParent(self)
@@ -1742,18 +1743,18 @@ class ReaderWindow(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Dynamic Teleprompter — Reader')
+        self.setWindowTitle(APP_NAME + ' — Reader')
         self.resize(580, 510)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
         self.status = QLabel('NEXT WORD  •  Ready')
-        self.status.setStyleSheet('color: #FACC15; font-weight: bold; font-size: 15px; padding: 6px;')
+        self.status.setObjectName('readerStatus')
         layout.addWidget(self.status)
         self.view = QTextEdit()
         self.view.setReadOnly(True)
         self.view.setUndoRedoEnabled(False)
         self.view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-        self.view.setStyleSheet('QTextEdit {background: #10151E; color: #F2F5F8; border: 0; padding: 22px;}')
+        self.view.setObjectName('readerText')
         self.reader_settings = QSettings('Cosmere-Cam', 'Reader')
         self.font_size_control = QSpinBox()
         self.font_size_control.setRange(20, 96)
@@ -1809,8 +1810,8 @@ class ReaderWindow(QWidget):
         cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
         selection = QTextEdit.ExtraSelection()
         selection.cursor = cursor
-        selection.format.setBackground(QColor('#FACC15'))
-        selection.format.setForeground(QColor('#10151E'))
+        selection.format.setBackground(QColor('#D8C6ED'))
+        selection.format.setForeground(QColor('#29262F'))
         selection.format.setFontWeight(QFont.Weight.Bold)
         self.view.setExtraSelections([selection])
         # cursorRect is viewport-relative. Add current offset to find its
@@ -1868,7 +1869,7 @@ class ReaderWindow(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f'Dynamic Teleprompter {APP_VERSION} — Control Center')
+        self.setWindowTitle(f'{APP_NAME} {APP_VERSION} — Control Center')
         self.resize(1050, 740)
         self.out = OutputWindow()
         self.reader = ReaderWindow()
@@ -1948,6 +1949,7 @@ class MainWindow(QMainWindow):
         self.test_advance_timer.setInterval(45)
         self.test_advance_timer.timeout.connect(self._animation_test_progress)
         self._test_rendered_prefix = None
+        self.plugin_controller = PluginController(self)
         self.build_ui()
         self.load_settings()
         self.prepare_groups()
@@ -2264,12 +2266,25 @@ class MainWindow(QMainWindow):
             chain.append(entry)
         return chain
 
+    def _audio_item_changed(self, item):
+        entry = dict(item.data(Qt.ItemDataRole.UserRole))
+        enabled = item.checkState() == Qt.CheckState.Checked
+        changed = entry.get('enabled') != enabled
+        if changed:
+            entry['enabled'] = enabled
+            self.audio_chain.blockSignals(True)
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            self.audio_chain.blockSignals(False)
+        self._update_live_record_settings()
+        if changed and enabled and entry.get('type') == 'vst2':
+            self.plugin_controller.prepare_chain()
+
     def _set_audio_chain(self, chain):
         self.audio_chain.blockSignals(True)
         self.audio_chain.clear()
         for effect in normalize_chain(chain):
-            if effect['type'] == 'vst3':
-                label = 'VST3: ' + Path(effect['path']).stem
+            if effect['type'] in ('vst2', 'vst3'):
+                label = ('ReaPlugs / VST2: ' if effect['type'] == 'vst2' else 'VST3: ') + Path(effect['path']).stem
             else:
                 label = EFFECT_NAMES[effect['type']]
             item = QListWidgetItem(label)
@@ -2280,8 +2295,23 @@ class MainWindow(QMainWindow):
             self.audio_chain.addItem(item)
         self.audio_chain.blockSignals(False)
         self._update_live_record_settings()
+        self.plugin_controller.prepare_chain()
+
+    def _add_vst2(self):
+        if self.recorder is not None:
+            QMessageBox.information(self, 'Recording in progress', 'Finish the recording before changing the plugin chain.')
+            return
+        paths, _ = QFileDialog.getOpenFileNames(self, 'Add installed 64-bit ReaPlugs / VST2 effects',
+            str(Path('C:/Program Files/VSTPlugins/ReaPlugs')), '64-bit VST2 effects (*.dll)')
+        if paths:
+            chain = self._audio_chain_snapshot()
+            chain.extend(dict(type='vst2', path=path, enabled=True) for path in paths)
+            self._set_audio_chain(chain)
+            self.audio_chain.setCurrentRow(self.audio_chain.count()-1)
 
     def _add_vst3(self):
+        if self.recorder is not None:
+            return
         path, _ = QFileDialog.getOpenFileName(self, 'Select a VST3 plugin',
                                               str(Path.home()), 'VST3 plugins (*.vst3);;All files (*)')
         if not path:
@@ -2305,6 +2335,9 @@ class MainWindow(QMainWindow):
             return
         item = self.audio_chain.item(row)
         entry = dict(item.data(Qt.ItemDataRole.UserRole))
+        if entry.get('type') == 'vst2':
+            self.plugin_controller.open_editor(entry)
+            return
         if entry.get('type') != 'vst3':
             QMessageBox.information(self, 'Built-in effect', 'Use the Gain, Gate, and Soft Clip controls above for built-in effects.')
             return
@@ -2377,27 +2410,37 @@ class MainWindow(QMainWindow):
         self._update_live_record_settings()
 
     def _remove_vst3(self):
+        if self.recorder is not None:
+            return
         row = self.audio_chain.currentRow()
         if row < 0:
             return
         entry = self.audio_chain.item(row).data(Qt.ItemDataRole.UserRole)
-        if entry.get('type') != 'vst3':
-            QMessageBox.information(self, 'Built-in effect', 'Only added VST3 plugins can be removed. Uncheck a built-in effect to bypass it.')
+        if entry.get('type') not in ('vst2', 'vst3'):
+            QMessageBox.information(self, 'Built-in effect', 'Only added plugins can be removed. Uncheck a built-in effect to bypass it.')
             return
         self.audio_chain.takeItem(row)
         self._update_live_record_settings()
+        self.plugin_controller.prepare_chain()
 
     def _refresh_vst3_status(self):
-        errors = plugin_errors()
-        if errors:
+        paths = {entry.get('path') for entry in self._audio_chain_snapshot()}
+        errors = {path: error for path, error in plugin_errors().items() if path in paths}
+        if self.plugin_controller.preparing:
+            self.vst3_status.setText('Preparing plugins in the background…')
+        elif self.plugin_controller.error:
+            self.vst3_status.setText('Plugin needs attention: ' + self.plugin_controller.error[:400])
+        elif errors:
             self.vst3_status.setText('VST3 bypassed due to error: ' + '; '.join(
                 Path(k).name + ': ' + v for k, v in errors.items())[:400])
         elif vst3_backend_available():
-            self.vst3_status.setText('VST3 host available (experimental). Third-party plugins run in an isolated process (experimental); failed plugins are bypassed.')
+            self.vst3_status.setText('ReaPlugs / VST2 and VST3 hosts available. Plugins run in separate processes; failed effects are bypassed.')
         else:
             self.vst3_status.setText('VST3 unavailable: run install_vst3_windows.bat to add the optional host. Built-in effects work normally.')
 
     def _move_audio_effect(self, direction):
+        if self.recorder is not None:
+            return
         row = self.audio_chain.currentRow()
         target = row + direction
         if row < 0 or target < 0 or target >= self.audio_chain.count():
@@ -2434,6 +2477,9 @@ class MainWindow(QMainWindow):
         self.monitor_status.setText('Monitoring off')
 
     def _start_monitor(self, external=False):
+        if self.plugin_controller.preparing:
+            self.monitor_status.setText('Please wait while plugins are prepared.')
+            return
         monitor = AudioMonitor(self._monitor_settings, lambda: self._monitor_level, self.monitor_device.currentData())
         try:
             monitor.start(external=external)
@@ -2497,6 +2543,9 @@ class MainWindow(QMainWindow):
         if self.recorder is not None:
             self._stop_recording()
             return
+        if self.plugin_controller.preparing:
+            self.record_status.setText('Please wait while plugins are prepared.')
+            return
         try:
             self.render()
             directory = Path(self.record_dir)
@@ -2523,6 +2572,7 @@ class MainWindow(QMainWindow):
             self.canvas_fps.setEnabled(False)
             self.record_toggle.setText('■ Stop Canvas Recording')
             self.record_discard.setEnabled(True)
+            self.audio_chain.setEnabled(False)
             self.record_status.setText('Recording: ' + str(filename))
             self.record_timer.start(10)
             self._capture_record_frame()
@@ -2606,6 +2656,7 @@ class MainWindow(QMainWindow):
         self.record_finish_timer.stop()
         self.recorder = None
         self.record_discard.setEnabled(False)
+        self.audio_chain.setEnabled(True)
         self.record_toggle.setEnabled(True)
         self.record_toggle.setText('● Start Canvas Recording')
         self.record_microphone.setEnabled(True)
@@ -2626,18 +2677,21 @@ class MainWindow(QMainWindow):
 
     def build_ui(self):
         central = QWidget()
+        central.setObjectName('suiteRoot')
         self.setCentralWidget(central)
         main = QVBoxLayout(central)
-        note = QLabel(f'{APP_VERSION} — {APP_NEWS}')
-        note.setWordWrap(True)
-        note.setStyleSheet('color: #B25B00; font-weight: bold;')
-        main.addWidget(note)
+        main.setContentsMargins(20, 16, 20, 16)
+        main.setSpacing(14)
+        title = QLabel(APP_NAME)
+        title.setObjectName('suiteTitle')
+        main.addWidget(title)
         tabs = QTabWidget()
         main.addWidget(tabs)
         script_page = QWidget()
         page = QVBoxLayout(script_page)
         page.addWidget(QLabel('Paste or edit your script:'))
         self.script = ScriptEditor()
+        self.script.setObjectName('scriptEditor')
         self.script.setPlainText(DEFAULT_SCRIPT)
         self.script.setFont(QFont('Arial', 17))
         page.addWidget(self.script, 1)
@@ -2670,10 +2724,12 @@ class MainWindow(QMainWindow):
         nav_top.addWidget(clear_button)
         left.addLayout(nav_top)
         nav_bottom = QHBoxLayout()
-        prev = QPushButton('◀ Previous')
+        prev = QPushButton('Previous')
+        prev.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
         prev.clicked.connect(self.previous)
         nav_bottom.addWidget(prev)
-        nxt = QPushButton('Next ▶')
+        nxt = QPushButton('Next')
+        nxt.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowForward))
         nxt.clicked.connect(self.next)
         nav_bottom.addWidget(nxt)
         self.progress = QLabel('0 / 0')
@@ -2682,7 +2738,8 @@ class MainWindow(QMainWindow):
         bottom.addLayout(left, 1)
 
         mic_panel = QWidget()
-        mic_panel.setFixedWidth(36)
+        mic_panel.setMinimumHeight(150)
+        mic_panel.setFixedWidth(48)
         mic_layout = QVBoxLayout(mic_panel)
         mic_layout.setContentsMargins(0, 0, 0, 0)
         mic_layout.setSpacing(4)
@@ -2697,14 +2754,18 @@ class MainWindow(QMainWindow):
         self.mic_meter.setFixedSize(20, 55)
         self.mic_meter.setStyleSheet('QProgressBar {background:#1d2427; border:1px solid #444;} QProgressBar::chunk {background:qlineargradient(x1:0,y1:1,x2:0,y2:0,stop:0 #13b84a,stop:0.55 #8bd936,stop:0.75 #f1da26,stop:1 #ed3434);}')
         mic_layout.addWidget(self.mic_meter, 0, Qt.AlignmentFlag.AlignHCenter)
-        self.mute_button = QPushButton('🔊')
-        self.mute_button.setFixedSize(32, 27)
+        self.mute_button = QPushButton('')
+        self.mute_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume))
+        self.mute_button.setObjectName('iconButton')
+        self.mute_button.setFixedSize(40, 40)
         self.mute_button.setToolTip('Mute listening')
         self.mute_button.setEnabled(False)
         self.mute_button.clicked.connect(self.toggle_mute)
         mic_layout.addWidget(self.mute_button)
-        self.quick_listen_button = QPushButton('◉')
-        self.quick_listen_button.setFixedSize(32, 27)
+        self.quick_listen_button = QPushButton('')
+        self.quick_listen_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.quick_listen_button.setObjectName('iconButton')
+        self.quick_listen_button.setFixedSize(40, 40)
         self.quick_listen_button.setToolTip('Start voice following')
         self.quick_listen_button.clicked.connect(self.toggle_listening)
         mic_layout.addWidget(self.quick_listen_button)
@@ -2713,11 +2774,12 @@ class MainWindow(QMainWindow):
         presentation_box = QGroupBox('Presentation startup')
         presentation_layout = QVBoxLayout(presentation_box)
         presentation_layout.setSpacing(5)
-        self.start_presentation_button = QPushButton('▶ Start Presentation')
+        self.start_presentation_button = QPushButton('Start Presentation')
+        self.start_presentation_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
         self.start_presentation_button.setMinimumHeight(34)
         self.start_presentation_button.clicked.connect(self.start_presentation)
         presentation_layout.addWidget(self.start_presentation_button)
-        self.start_first_slide = QCheckBox('Start with first slide already displayed')
+        self.start_first_slide = QCheckBox('Show the first slide on start')
         self.start_first_slide.setChecked(True)
         presentation_layout.addWidget(self.start_first_slide)
         self.start_voice_following = QCheckBox('Initiate Voice Following')
@@ -2729,7 +2791,7 @@ class MainWindow(QMainWindow):
 
         self.current = QLabel('Current group appears here.')
         self.current.setWordWrap(True)
-        self.current.setStyleSheet('padding: 6px; border: 1px solid #888;')
+        self.current.setStyleSheet('padding: 10px; border: 0; border-radius: 12px; background: #29262F; color: #F7F5F0;')
         page.addWidget(self.current)
         self.mic_decay_timer = QTimer(self)
         self.mic_decay_timer.setInterval(250)
@@ -2861,20 +2923,23 @@ class MainWindow(QMainWindow):
         move_down.clicked.connect(lambda: self._move_audio_effect(1))
         chain_buttons_row.addWidget(move_up)
         chain_buttons_row.addWidget(move_down)
+        add_vst2 = QPushButton('Add ReaPlugs / VST2…')
+        add_vst2.clicked.connect(self._add_vst2)
+        chain_buttons_row.addWidget(add_vst2)
         add_vst3 = QPushButton('Add VST3…')
         add_vst3.clicked.connect(self._add_vst3)
         chain_buttons_row.addWidget(add_vst3)
-        edit_vst3 = QPushButton('Edit VST3 Parameters…')
+        edit_vst3 = QPushButton('Plugin controls…')
         edit_vst3.clicked.connect(self._edit_vst3_parameters)
         chain_buttons_row.addWidget(edit_vst3)
-        remove_vst3 = QPushButton('Remove VST3')
+        remove_vst3 = QPushButton('Remove plugin')
         remove_vst3.clicked.connect(self._remove_vst3)
         chain_buttons_row.addWidget(remove_vst3)
         record_form.addRow('', chain_buttons)
-        self.audio_chain.itemChanged.connect(self._update_live_record_settings)
+        self.audio_chain.itemChanged.connect(self._audio_item_changed)
         self._set_audio_chain(DEFAULT_CHAIN)
         self.audio_processing_status = QLabel('Built-in Gain, Noise Gate and Soft Clip can be bypassed or reordered. '
-            'Live monitoring and recording share this chain. VST3 plugins are experimental; generic parameters can be edited. Native plugin UIs and VST2 are not supported.')
+            'Live monitoring and recording share this chain. Add installed 64-bit ReaPlugs DLLs and open Plugin controls for their original editors. Full state is saved with your project. Tune effects before recording. This voice path is mono; external sidechains and MIDI are not routed. VST3 generic controls remain available.')
         self.audio_processing_status.setWordWrap(True)
         record_form.addRow('', self.audio_processing_status)
         self.vst3_status = QLabel()
@@ -2932,9 +2997,11 @@ class MainWindow(QMainWindow):
         record_form.addRow('Encoder found:', self.ffmpeg_label)
         self.update_ffmpeg_label()
         self.record_toggle = QPushButton('● Start Canvas Recording')
+        self.record_toggle.setProperty('role', 'primary')
         self.record_toggle.clicked.connect(self._toggle_recording)
         record_form.addRow('Recorder:', self.record_toggle)
         self.record_discard = QPushButton('Discard Recording…')
+        self.record_discard.setProperty('role', 'danger')
         self.record_discard.setEnabled(False)
         self.record_discard.clicked.connect(self._discard_recording)
         record_form.addRow('Bad take:', self.record_discard)
@@ -3186,7 +3253,7 @@ class MainWindow(QMainWindow):
         self.heard_display = QLabel('(waiting)')
         self.heard_display.setWordWrap(True)
         self.heard_display.setMinimumHeight(65)
-        self.heard_display.setStyleSheet('border: 1px solid #888; padding: 8px;')
+        self.heard_display.setStyleSheet('border: 1px solid #DFD8E5; border-radius: 12px; padding: 12px; background: white;')
         voice_layout.addWidget(self.heard_display)
         voice_layout.addWidget(QLabel('Matching is conservative: if the engine is uncertain, use Previous/Next to correct the location.'))
         voice_layout.addStretch()
@@ -3310,9 +3377,9 @@ class MainWindow(QMainWindow):
         reader_lock.toggled.connect(lambda on: self._lock_window(self.reader, on))
 
         help_menu = menu.addMenu('&Help')
-        help_menu.addAction('About Dynamic Teleprompter', lambda: QMessageBox.information(
-            self, 'About Dynamic Teleprompter',
-            f'Dynamic Teleprompter {APP_VERSION}\n\n{APP_NEWS}'))
+        help_menu.addAction('About ' + APP_NAME, lambda: QMessageBox.information(
+            self, 'About ' + APP_NAME,
+            f'{APP_NAME} {APP_VERSION}\n\n{APP_NEWS}'))
         # Classic Alt-to-show menu; no permanent menu row consuming screen space.
         self._menu_open = False
         self._alt_down = False
@@ -3494,7 +3561,7 @@ class MainWindow(QMainWindow):
     def _preview_window(self):
         if self.animation_test_window is None:
             self.animation_test_window = OutputWindow()
-            self.animation_test_window.setWindowTitle('Dynamic Teleprompter — Animation Test (not OBS)')
+            self.animation_test_window.setWindowTitle(APP_NAME + ' — Animation Test')
             self.animation_test_window.resize(660, 300)
         self.animation_test_window.show()
         self.animation_test_window.raise_()
@@ -3679,7 +3746,7 @@ class MainWindow(QMainWindow):
             return
         self.voice_muted = not self.voice_muted
         self.voice_worker.set_muted(self.voice_muted)
-        self.mute_button.setText('🔇' if self.voice_muted else '🔊')
+        self.mute_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolumeMuted if self.voice_muted else QStyle.StandardPixmap.SP_MediaVolume))
         self.mute_button.setToolTip('Unmute listening' if self.voice_muted else 'Mute listening')
         self.update_mic_indicator()
 
@@ -3746,7 +3813,7 @@ class MainWindow(QMainWindow):
     def set_listen_button_text(self, label):
         self.listen_button.setText(label)
         active = label.startswith('Stop')
-        self.quick_listen_button.setText('◉' if active else '◉̸')
+        self.quick_listen_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause if active else QStyle.StandardPixmap.SP_MediaPlay))
         self.quick_listen_button.setToolTip('Stop voice following' if active else 'Start voice following')
         self.quick_listen_button.setStyleSheet('color:#148f47; font-weight:bold;' if active else 'color:#b35d26; font-weight:bold;')
 
@@ -3771,7 +3838,7 @@ class MainWindow(QMainWindow):
             self.next()
         if self.start_voice_following.isChecked():
             self.toggle_listening(preserve_presentation=True)
-        self.start_presentation_button.setText('▶ Restart Presentation')
+        self.start_presentation_button.setText('Restart Presentation')
 
     def toggle_listening(self, preserve_presentation=False):
         if self.voice_worker is not None and self.voice_worker.isRunning():
@@ -3793,7 +3860,7 @@ class MainWindow(QMainWindow):
             self.voice_cursor = 0
         self.voice_enabled = True
         self.voice_muted = False
-        self.mute_button.setText('🔊')
+        self.mute_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume))
         self.mute_button.setEnabled(True)
         self.last_input_level = 0.0
         self.last_input_time = 0.0
@@ -3810,7 +3877,7 @@ class MainWindow(QMainWindow):
         self.voice_enabled = False
         self.voice_muted = False
         self.mute_button.setEnabled(False)
-        self.mute_button.setText('🔊')
+        self.mute_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume))
         self.last_input_level = 0.0
         self.mic_meter.setValue(0)
         self.update_mic_indicator()
@@ -3822,7 +3889,7 @@ class MainWindow(QMainWindow):
         self.voice_enabled = False
         self.voice_muted = False
         self.mute_button.setEnabled(False)
-        self.mute_button.setText('🔊')
+        self.mute_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume))
         self.last_input_level = 0.0
         self.update_mic_indicator()
         self.set_listen_button_text('Start Voice Following')
@@ -4302,6 +4369,12 @@ class MainWindow(QMainWindow):
         return json.dumps(self._project_payload(), sort_keys=True, ensure_ascii=False)
 
     def save_project(self, save_as=False):
+        if self.recorder is None:
+            try:
+                self.plugin_controller.capture_for_save()
+            except Exception as error:
+                QMessageBox.warning(self, 'Plugin state could not be saved', str(error))
+                return False
         path = self.project_path
         if save_as or not path:
             selected, _ = QFileDialog.getSaveFileName(self, 'Save teleprompter project',
@@ -4322,6 +4395,9 @@ class MainWindow(QMainWindow):
             return False
 
     def open_project(self):
+        if self.recorder is not None:
+            QMessageBox.information(self, 'Recording in progress', 'Finish the recording before opening another project.')
+            return
         selected, _ = QFileDialog.getOpenFileName(self, 'Open teleprompter project', '',
                                                   'Teleprompter projects (*.teleprompter.json *.json)')
         if not selected:
@@ -4334,6 +4410,9 @@ class MainWindow(QMainWindow):
             if not isinstance(data.get('settings'), dict) or not isinstance(data.get('script'), str):
                 raise ValueError('Project is missing valid script or settings data.')
             self.stop_listening()
+            self._stop_monitor()
+            import vst2_host
+            vst2_host.close_all()
             self.apply_settings_values(data['settings'])
             self.visual_global = dict(data.get('visual_global') or {})
             self.slide_visuals = {int(key): dict(value) for key, value in
@@ -4442,6 +4521,12 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, 'Could not save file', str(exc))
 
     def save_settings(self):
+        if self.recorder is None:
+            try:
+                self.plugin_controller.capture_for_save()
+            except Exception as error:
+                QMessageBox.warning(self, 'Plugin state could not be saved', str(error))
+                return
         try:
             SETTINGS_PATH.write_text(json.dumps(self.settings(), indent=2), encoding='utf-8')
             QMessageBox.information(self, 'Saved', f'Display settings saved to {SETTINGS_PATH}')
@@ -4458,6 +4543,17 @@ class MainWindow(QMainWindow):
             pass
 
     def closeEvent(self, event):
+        if self.plugin_controller.preparing:
+            QMessageBox.information(self, 'Plugins are preparing', 'Please wait for plugin preparation to finish before closing.')
+            event.ignore()
+            return
+        if self.recorder is None:
+            try:
+                self.plugin_controller.capture_for_save()
+            except Exception as error:
+                QMessageBox.warning(self, 'Plugin state needs attention', str(error))
+                event.ignore()
+                return
         if self._project_snapshot() != getattr(self, '_saved_project_snapshot', None):
             answer = QMessageBox.question(
                 self, 'Save changes before exiting?',
@@ -4496,6 +4592,7 @@ class MainWindow(QMainWindow):
         VIDEO_FRAMES.shutdown()
         self.out.close()
         self.reader.close()
+        self.plugin_controller.shutdown()
         try:
             self.updates.on_clean_close()
         except OSError as error:
@@ -4505,6 +4602,8 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    from theme import apply_theme
+    apply_theme(app)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
@@ -4512,5 +4611,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 

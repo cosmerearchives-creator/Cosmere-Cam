@@ -20,7 +20,7 @@ from update_core import atomic_json
 def main():
     root = Path(sys.argv[1])
     os.environ['COSMERE_INSTALL_ROOT'] = str(root)
-    os.environ['COSMERE_GITHUB_TOKEN'] = os.environ['GH_TOKEN']
+    os.environ.pop('COSMERE_GITHUB_TOKEN', None)
     os.environ.pop('COSMERE_TEST_MODE', None)
     update_ui.VERSION = '0.0.0'  # Previous-version protocol fixture, never a shipped override.
     app = QApplication([])
@@ -51,10 +51,9 @@ def main():
         window.updates.restart()
     window.updates.downloaded.connect(ready)
     QTimer.singleShot(180_000, lambda: app.exit(2))
-    with patch('update_ui.subprocess.Popen', side_effect=test_restart):
+    with patch('update_ui.subprocess.Popen', side_effect=test_restart), patch('update_ui.read_token', return_value=''):
         return app.exec()
 
 
 if __name__ == '__main__':
     sys.exit(main())
-

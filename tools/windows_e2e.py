@@ -61,7 +61,7 @@ def main():
             path.write_text('{}' if path.suffix == '.json' else 'user owned data', encoding='utf-8')
         before = {str(path): sha256(path) for path in user_files}
         if args.published:
-            client = GitHub(os.environ['GH_TOKEN'])
+            client = GitHub()  # Published updates must work without credentials.
             update = find_update(client, '0.0.0')
             assert update and update['version'] == VERSION, update
             stage_update(client, update, root)
@@ -69,10 +69,30 @@ def main():
             helper = Path(read_json(root / 'pending.json')['package']).parent / 'CosmereCamLauncher.exe'
             run([helper, '--root', root, '--apply-only'], environment)
             results['published_detection_and_download'] = VERSION
+            results['anonymous_public_updates'] = True
         else:
-            run([ROOT / 'dist/Cosmere-Cam-Setup.exe', '--root', root, '--no-launch'], environment)
+            run([ROOT / 'dist/Cosmere-Video-Recording-Suite-Setup.exe', '--root', root, '--no-launch'], environment)
             results['fresh_installer'] = True
         results['first_launch'] = smoke(root, environment)
+        if not args.published:
+            # Actual shipping alpha17 launcher must keep protocol-v1 compatibility.
+            from update_core import API
+            client = GitHub()
+            previous_release = client.json(API + '/releases/tags/v0.5.0-alpha17')
+            previous_client = GitHub()
+            previous_client.json = lambda url: [previous_release]
+            previous_update = find_update(previous_client, '0.0.0')
+            older_root = base / 'real-alpha17-upgrade'
+            stage_update(previous_client, previous_update, older_root)
+            previous_pending = read_json(older_root / 'pending.json')
+            previous_active = deploy(older_root, previous_pending)
+            shutil.copyfile(version_path(older_root, previous_active) / 'CosmereCamLauncher.exe',
+                            older_root / 'CosmereCamLauncher.exe')
+            (older_root / 'transaction.json').unlink()
+            current_package = ROOT / 'dist' / PACKAGE_NAME
+            atomic_json(older_root / 'pending.json', {'package': str(current_package),
+                'version': VERSION, 'sha256': sha256(current_package), 'notes': 'Real alpha17 upgrade'})
+            results['real_alpha17_launcher_upgrade'] = smoke(older_root, environment)
         original = read_json(root / 'active.json')
         # A compatible previous-version fixture points at the genuine running bundle.
         baseline = dict(original, version='0.5.0-alpha16.2', notes='Previous fixture')
@@ -154,4 +174,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

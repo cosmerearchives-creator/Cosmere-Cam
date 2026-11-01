@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 from setup_live2d_sdk import runtime_directory, install_sdk, DLL
-from version import VERSION
+from version import VERSION, APP_NAME
 
 HERE = Path(__file__).resolve().parent
 REQUIRED = [('PySide6', 'PySide6>=6.6,<7'), ('spellchecker', 'pyspellchecker>=0.8,<1'),
@@ -32,7 +32,7 @@ def pip_install(specs):
 
 
 def main():
-    print('Dynamic Teleprompter v' + VERSION + ' - Unified Setup')
+    print(APP_NAME + ' v' + VERSION + ' - Unified Setup')
     print('Python:', sys.version.split()[0], '| Executable:', sys.executable)
     missing = [spec for module, spec in REQUIRED if importlib.util.find_spec(module) is None]
     if missing and not pip_install(missing):
@@ -71,5 +71,4 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
-
 

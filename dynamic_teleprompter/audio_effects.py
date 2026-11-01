@@ -7,6 +7,7 @@ import numpy as np
 import threading
 import math
 import time
+import uuid
 from audio_diagnostics import observe
 from pathlib import Path
 
@@ -52,16 +53,25 @@ def normalize_chain(chain):
     """Preserve ordered VST3 instances and one copy of each built-in processor."""
     result = []
     used = set()
+    instances = set()
     for entry in chain or []:
         if not isinstance(entry, dict):
             continue
         kind = entry.get('type')
-        if kind == 'vst3':
+        if kind in ('vst2', 'vst3'):
             path = str(entry.get('path', '')).strip()
             if path:
-                result.append(dict(type='vst3', path=path, plugin_name=str(entry.get('plugin_name', '')),
+                item = dict(type=kind, path=path, plugin_name=str(entry.get('plugin_name', '')),
                                    enabled=bool(entry.get('enabled', True)),
-                                   parameters=dict(entry.get('parameters', {})) if isinstance(entry.get('parameters', {}), dict) else {}))
+                                   parameters=dict(entry.get('parameters', {})) if isinstance(entry.get('parameters', {}), dict) else {})
+                if kind == 'vst2':
+                    instance = str(entry.get('instance_id') or uuid.uuid4())
+                    if instance in instances:
+                        instance = str(uuid.uuid4())
+                    instances.add(instance)
+                    item['instance_id'] = instance
+                    item['state'] = str(entry.get('state', ''))
+                result.append(item)
             continue
         if kind in EFFECT_NAMES and kind not in used:
             result.append(dict(type=kind, enabled=bool(entry.get('enabled', True))))
@@ -88,9 +98,15 @@ def process_chain(data, chain, gain=100, gate_db=-45, clip_drive=150):
         elif kind == 'gate':
             threshold = round(32767 * 10 ** (int(gate_db) / 20))
             data, _ = process_audio_s16(data, 100, threshold)
-        elif kind == 'vst3':
+        elif kind in ('vst2', 'vst3'):
             try:
-                data = _process_vst3(data, entry)
+                if kind == 'vst2':
+                    from vst2_host import process
+                    data = process(data, entry)
+                    with _error_lock:
+                        _plugin_errors.pop(entry['path'], None)
+                else:
+                    data = _process_vst3(data, entry)
             except Exception as exc:
                 # Bypass the faulty plugin; capture its status for the interface instead of stopping recording.
                 with _error_lock:
@@ -105,3 +121,4 @@ def process_chain(data, chain, gain=100, gate_db=-45, clip_drive=150):
     peak = int(np.max(np.abs(np.frombuffer(data, dtype='<i2').astype(np.int32)))) if data else 0
     observe('audio_chain', (time.perf_counter() - started) * 1000, block_budget_ms)
     return data, peak
+

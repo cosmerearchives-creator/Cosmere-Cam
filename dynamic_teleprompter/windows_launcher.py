@@ -12,6 +12,7 @@ from pathlib import Path
 
 from update_core import (install_root, install_lock, read_json, atomic_json,
                          unpack_package, deploy, recover, version_path, sha256)
+from version import APP_NAME
 
 
 def wait_for_pid(pid):
@@ -39,11 +40,17 @@ def shortcut(root):
     script = root / 'create-shortcut.vbs'
     script.write_text('Set sh = CreateObject("WScript.Shell")\n'
                       'Set link = sh.CreateShortcut(WScript.Arguments(0))\n'
-                      'link.TargetPath = WScript.Arguments(1)\nlink.Save\n', encoding='utf-8')
-    target = Path(os.environ['APPDATA']) / 'Microsoft/Windows/Start Menu/Programs/Cosmere-Cam.lnk'
+                      'link.TargetPath = WScript.Arguments(1)\nlink.Save\n'
+                      'Set fs = CreateObject("Scripting.FileSystemObject")\n'
+                      'If fs.FileExists(WScript.Arguments(2)) Then\n'
+                      '  Set old = sh.CreateShortcut(WScript.Arguments(2))\n'
+                      '  If LCase(old.TargetPath) = LCase(WScript.Arguments(1)) Then fs.DeleteFile WScript.Arguments(2)\n'
+                      'End If\n', encoding='utf-8')
+    target = Path(os.environ['APPDATA']) / ('Microsoft/Windows/Start Menu/Programs/' + APP_NAME + '.lnk')
+    legacy = target.with_name('Cosmere-Cam.lnk')
     target.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(['cscript.exe', '//nologo', str(script), str(target),
-                    str(root / 'CosmereCamLauncher.exe')], check=True,
+                    str(root / 'CosmereCamLauncher.exe'), str(legacy)], check=True,
                    creationflags=subprocess.CREATE_NO_WINDOW)
     script.unlink(missing_ok=True)
 
@@ -53,7 +60,7 @@ def launch(root, smoke=False, timeout=60):
     root = Path(root)
     active = read_json(root / 'active.json')
     if not active:
-        raise RuntimeError('No working installation. Run the Cosmere-Cam installer again.')
+        raise RuntimeError('No working installation. Run the Cosmere Video Recording Suite installer again.')
     transaction = read_json(root / 'transaction.json')
     if transaction:
         transaction['booting'] = True
@@ -157,6 +164,5 @@ if __name__ == '__main__':
         sys.exit(main())
     except Exception as error:
         if os.name == 'nt' and not '--smoke-test' in sys.argv:
-            ctypes.windll.user32.MessageBoxW(None, str(error), 'Cosmere-Cam startup', 0x10)
+            ctypes.windll.user32.MessageBoxW(None, str(error), APP_NAME + ' startup', 0x10)
         sys.exit(1)
-

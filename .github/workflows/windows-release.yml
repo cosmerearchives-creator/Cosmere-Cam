@@ -23,6 +23,7 @@ jobs:
       PYTHONUTF8: '1'
       QT_QPA_PLATFORM: offscreen
       COSMERE_TEST_MODE: '1'
+      COSMERE_REAPLUGS_TEST_DIR: ${{ github.workspace }}/build/reaplugs-test/plugins
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,6 +45,14 @@ jobs:
           python tools/build_windows.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python -m pip freeze > dist/requirements-resolved.txt
+      - name: Verify official x64 ReaPlugs audio, native editors and saved profiles
+        run: python tools/verify_reaplugs.py --editors
+      - name: Capture suite screens and themed dialogs
+        run: python tools/capture_ui.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Suite-UI-previews
+          path: build/ui-preview/*.png
       - name: Windows installer, upgrade, rollback, Qt and FFmpeg tests
         run: python tools/windows_e2e.py
       - name: Set release version
@@ -54,15 +63,16 @@ jobs:
           "tag=v$version" >> $env:GITHUB_OUTPUT
       - uses: actions/upload-artifact@v4
         with:
-          name: Cosmere-Cam-Windows
+          name: Cosmere-Video-Recording-Suite-Windows
           path: |
-            dist/Cosmere-Cam-Setup.exe
+            dist/Cosmere-Video-Recording-Suite-Setup.exe
             dist/Cosmere-Cam-Windows-x64.zip
             dist/update-manifest.json
             dist/*-source.zip
             dist/release-notes.md
             dist/requirements-resolved.txt
             dist/windows-verification.json
+            dist/reaplugs-verification.json
           retention-days: 30
       - name: Publish verified version as draft
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -88,7 +98,7 @@ jobs:
               exit 0
             }
           }
-          gh release create $tag dist/Cosmere-Cam-Setup.exe dist/Cosmere-Cam-Windows-x64.zip dist/update-manifest.json dist/*-source.zip dist/requirements-resolved.txt dist/windows-verification.json --target "$env:GITHUB_SHA" --title "Cosmere-Cam $tag" --notes-file dist/release-notes.md --draft --prerelease
+          gh release create $tag dist/Cosmere-Video-Recording-Suite-Setup.exe dist/Cosmere-Cam-Windows-x64.zip dist/update-manifest.json dist/*-source.zip dist/requirements-resolved.txt dist/windows-verification.json dist/reaplugs-verification.json --target "$env:GITHUB_SHA" --title "Cosmere Video Recording Suite $tag" --notes-file dist/release-notes.md --draft --prerelease
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           "created=true" >> $env:GITHUB_OUTPUT
       - name: Verify uploaded asset hashes before publishing
@@ -124,4 +134,3 @@ jobs:
             dist/*verification.json
             build/**/*.txt
           if-no-files-found: ignore
-

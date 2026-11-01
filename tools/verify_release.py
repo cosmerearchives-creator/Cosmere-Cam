@@ -25,7 +25,7 @@ def main():
     release = release_for_version(client, VERSION)
     assets = {a['name']: a for a in release['assets']}
     with tempfile.TemporaryDirectory() as folder:
-        for name in ('Cosmere-Cam-Setup.exe', PACKAGE_NAME, MANIFEST_NAME):
+        for name in ('Cosmere-Video-Recording-Suite-Setup.exe', PACKAGE_NAME, MANIFEST_NAME):
             asset = assets[name]
             target = client.download(asset, Path(folder) / name)
             assert sha256(target) == sha256(ROOT / 'dist' / name) == digest(asset), name
@@ -38,4 +38,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
