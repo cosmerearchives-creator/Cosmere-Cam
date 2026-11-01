@@ -78,6 +78,8 @@ class CanvasRecorder:
         self.peak_queue_depth = 0
         self.duplicate_frames = 0
         self.audio_samples = 0
+        self.plugin_latency_samples = 0
+        self._latency_remaining = 0
         self.report_path = self.path.with_suffix('.diagnostics.json')
 
     def start(self):
@@ -85,6 +87,11 @@ class CanvasRecorder:
         self._ffmpeg = ffmpeg
         if not ffmpeg:
             raise RuntimeError('FFmpeg not found. Open Settings → FFmpeg Location to select ffmpeg.exe, or put it beside app.py.')
+        if self.microphone:
+            from vst2_host import latency, hide_editors
+            hide_editors()
+            self.plugin_latency_samples = latency(self.audio_chain, refresh=True)
+            self._latency_remaining = self.plugin_latency_samples
         self._temp = tempfile.TemporaryDirectory(prefix='dt_record_')
         self._silent = Path(self._temp.name) / 'video.mp4'
         self._wave = Path(self._temp.name) / 'microphone.wav'
@@ -94,7 +101,8 @@ class CanvasRecorder:
                    '-i', 'pipe:0', '-an', '-c:v', 'libx264', '-preset', 'ultrafast',
                    '-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(self._silent)]
         self._video = subprocess.Popen(command, stdin=subprocess.PIPE,
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         try:
             if self.microphone:
                 import sounddevice as sd
@@ -191,13 +199,33 @@ class CanvasRecorder:
                     self.audio_level_listener(data)
                 data, peak = process_chain(data, self.audio_chain, gain, db, self.audio_clip_drive)
                 self.audio_peak = max(self.audio_peak, peak)
-                self._audio_file.writeframesraw(data)
+                self._write_aligned_audio(data)
                 listener = self.audio_listener
                 if listener is not None:
                     listener(data)
             except Exception as exc:
                 self.error = 'Audio processing failed: ' + str(exc)
                 break
+        # Flush algorithmic lookahead only for Stop/Save. Discard never does DSP
+        # finalization. Trimming the initial delay and draining exactly that many
+        # samples preserves the captured duration and video alignment.
+        if not self.cancelled and self.stopping and not self.error:
+            try:
+                remaining = self.plugin_latency_samples
+                while remaining > 0 and not self.cancelled:
+                    count = min(2048, remaining)
+                    data, _ = process_chain(bytes(count * 2), self.audio_chain,
+                        int(self.audio_gain), int(self.audio_gate_db), self.audio_clip_drive)
+                    self._write_aligned_audio(data)
+                    remaining -= count
+            except Exception as exc:
+                self.error = 'Audio finalization failed: ' + str(exc)
+
+    def _write_aligned_audio(self, data):
+        skip = min(self._latency_remaining, len(data) // 2)
+        self._latency_remaining -= skip
+        if len(data) > skip * 2:
+            self._audio_file.writeframesraw(data[skip * 2:])
 
     def finish_async(self):
         if self.stopping:
@@ -214,6 +242,7 @@ class CanvasRecorder:
             'wall_clock_seconds': round(elapsed, 3),
             'video_duration_seconds': round(self.frame_count / self.fps, 3),
             'audio_dsp_backend': self.audio_dsp_backend,
+            'plugin_latency_compensated_samples': self.plugin_latency_samples,
             'audio_effect_chain': self.audio_chain,
             'audio_soft_clip_drive_percent': self.audio_clip_drive,
             'audio_gain_percent': self.audio_gain,
@@ -267,7 +296,8 @@ class CanvasRecorder:
                            '-i', str(self._silent), '-i', str(self._wave),
                            '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac',
                            '-b:a', '160k', '-shortest', '-movflags', '+faststart', str(self.path)]
-                subprocess.run(command, check=True, capture_output=True, timeout=180)
+                subprocess.run(command, check=True, capture_output=True, timeout=180,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             else:
                 shutil.copyfile(self._silent, self.path)
         except Exception as exc:
@@ -347,5 +377,4 @@ class CanvasRecorder:
                 self.finished = True
         threading.Thread(target=discard, daemon=True).start()
         return True
-
 

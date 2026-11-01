@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, QTimer, Signal, Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QPushButton,
                              QProgressBar, QInputDialog, QLineEdit)
 from update_core import (GitHub, find_update, stage_update, read_json, install_root)
-from version import VERSION, RELEASE_NOTES
+from version import VERSION, RELEASE_NOTES, APP_NAME
 
 
 def credential_store():
@@ -29,7 +29,8 @@ def read_token():
 
 
 def critical_operation(window):
-    return (window.recorder is not None or window.audio_monitor is not None or
+    controller = vars(window).get('plugin_controller')
+    return (bool(controller and controller.preparing) or window.recorder is not None or window.audio_monitor is not None or
             any(worker is not None and worker.isRunning() for worker in (
                 getattr(window, 'voice_worker', None), getattr(window, 'test_voice_worker', None),
                 getattr(window, 'downloader', None))))
@@ -51,7 +52,10 @@ class Updates(QObject):
         self.pending = read_json(self.root / 'pending.json')
         self.page = QWidget()
         layout = QVBoxLayout(self.page)
-        layout.addWidget(QLabel('Installed version: ' + VERSION))
+        heading = QLabel('Updates & what’s new')
+        heading.setObjectName('sectionTitle')
+        layout.addWidget(heading)
+        layout.addWidget(QLabel(APP_NAME + ' • ' + VERSION))
         notes = QLabel(RELEASE_NOTES)
         notes.setTextFormat(Qt.TextFormat.PlainText)
         notes.setWordWrap(True)
@@ -66,7 +70,8 @@ class Updates(QObject):
         self.check_button = QPushButton('Check for updates')
         self.check_button.clicked.connect(self.check)
         layout.addWidget(self.check_button)
-        self.access_button = QPushButton('Connect private release access…')
+        self.access_button = QPushButton('Optional GitHub access…')
+        self.access_button.setToolTip('Public updates need no sign-in. Optional access can help with GitHub rate limits.')
         self.access_button.clicked.connect(self.connect_access)
         layout.addWidget(self.access_button)
         self.restart_button = QPushButton('Restart & Update')
@@ -91,8 +96,9 @@ class Updates(QObject):
             QTimer.singleShot(5000, self.check)
 
     def connect_access(self):
-        token, accepted = QInputDialog.getText(self.window, 'Private GitHub releases',
-            'Enter a GitHub fine-grained token with Contents: read-only access to\n'
+        token, accepted = QInputDialog.getText(self.window, 'Optional GitHub access',
+            'Public updates work without sign-in. For higher request limits, you may enter\n'
+            'a GitHub fine-grained token with Contents: read-only access to\n'
             'cosmerearchives-creator/Cosmere-Cam. Stored in Windows Credential Manager.\n'
             'Leave blank to forget the saved token.', QLineEdit.EchoMode.Password)
         if accepted:
@@ -122,9 +128,6 @@ class Updates(QObject):
         def work():
             try:
                 token = read_token()
-                if not token:
-                    self.message.emit('Private releases need one-time access. Choose Connect private release access.')
-                    return
                 self.message.emit('Checking for updates…')
                 client = GitHub(token)
                 update = find_update(client, VERSION)
@@ -140,7 +143,7 @@ class Updates(QObject):
                 self.downloaded.emit(pending)
             except Exception:
                 # Do not expose tokens, signed redirect URLs, or request headers.
-                self.message.emit('Update check/download unavailable. Current version is unchanged; retry later or check private release access.')
+                self.message.emit('Updates are temporarily unavailable. Your installed version is unchanged. Retry later; optional GitHub access may help if a rate limit was reached.')
             finally:
                 self.completed.emit()
         threading.Thread(target=work, daemon=True).start()
@@ -174,4 +177,3 @@ class Updates(QObject):
         if not self.restart_requested:
             command.append('--apply-only')
         subprocess.Popen(command, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-

@@ -12,7 +12,7 @@ verification reports accompany each release. No local repackaging is required.
 
 ## Install and migrate
 
-Download **Cosmere-Cam-Setup.exe** from this private repository's Releases page. Run
+Download **Cosmere-Video-Recording-Suite-Setup.exe** from this public repository's Releases page. Run
 as the ordinary Windows user; no Python, ZIP extraction or administrator rights needed.
 The Start menu shortcut launches `%LOCALAPPDATA%\CosmereCam\CosmereCamLauncher.exe`.
 Windows may show SmartScreen because the EXE has no commercial Authenticode certificate.
@@ -25,19 +25,20 @@ are preserved in place. The updater never copies/deletes these directories. Move
 folders may still need their paths selected again. A source checkout with this new code
 can bootstrap the managed application through the Updates tab.
 
-## Private repository access
+## Public update access
 
-Updates tab → Connect private release access accepts a GitHub fine-grained personal
-access token with **Contents: read-only** for **cosmerearchives-creator/Cosmere-Cam**.
-It is stored only in Windows Credential Manager, never in the app, package or settings
-files. An environment token `COSMERE_GITHUB_TOKEN` is also supported for managed setups.
-Expired/missing access leaves the app working and displays a retry/access message.
-This one-time access cannot be inherited from Codex's separate GitHub connection.
-Checks occur 5 seconds after launch and every 6 hours. Alpha prereleases are included.
+Public release checks and downloads require no GitHub account or token. Checks run
+5 seconds after launch and every 6 hours, including alpha prereleases. Optional
+GitHub access is stored in Windows Credential Manager; expired credentials fall
+back to anonymous access. Alpha17 installations without connected access need the
+new installer once because their old controller requires credentials.
+
+User-facing branding is Cosmere Video Recording Suite. Internal CosmereCam paths,
+launcher filenames and protocol-v1 package names stay stable for existing installs.
 
 ## Deployment and trust
 
-GitHub HTTPS and write access to the fixed private repository are the update trust root.
+GitHub HTTPS and write access to the fixed public repository are the update trust root.
 The updater requires GitHub's server-generated SHA-256 digest for both the manifest
 and payload, binds manifest version/platform/size/hash to the matching release asset,
 and verifies a complete internal file inventory before extraction and deployment.
@@ -72,10 +73,13 @@ Windows integration executes the actual frozen installer/launcher/Qt application
 capture/discard, verifies legacy-data persistence, failed EXE boot rollback and the published
 release download. The previous-version protocol fixture is explicitly synthetic because the
 repository had no historical Windows releases. Existing alpha users need the one-time installer.
-Real microphone input, VST plugins, cameras, Cubism Core and licensed models require a manual
+Official x64 ReaEQ/ReaComp/ReaGate/ReaFIR processing, native editor opening, saved
+state, synthetic learned-profile restoration and recording delay compensation are
+verified separately by tools/verify_reaplugs.py. Vendor DLLs stay in ignored build
+folders and are never packaged. Real microphone input, listening quality, cameras,
+Cubism Core and licensed models require a manual
 smoke test on the user's workstation. Automated reports must not be described as those tests.
 
 Bundled open-source runtime/dependency notices are under `licenses/` in each payload.
 FFmpeg is supplied by imageio-ffmpeg; retain its upstream license and corresponding-source
 links when redistributing: https://github.com/imageio/imageio-ffmpeg and https://ffmpeg.org/.
-

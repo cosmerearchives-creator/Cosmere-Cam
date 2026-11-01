@@ -15,10 +15,12 @@ from PySide6.QtWidgets import QApplication
 from app import MainWindow
 from version import VERSION
 from update_core import atomic_json
+from theme import apply_theme
 
 
 def run():
     application = QApplication(sys.argv)
+    apply_theme(application)
     smoke = '--smoke-test' in sys.argv
     if smoke:
         MainWindow.prompt_model_if_missing = lambda self: None
@@ -27,7 +29,29 @@ def run():
     def complete_startup():
         root = os.environ.get('COSMERE_INSTALL_ROOT')
         token = os.environ.get('COSMERE_BOOT_TOKEN')
+        if root and not smoke:
+            # Alpha17 launchers are intentionally stable; migrate only the
+            # Start-menu branding after a healthy newer application starts.
+            import threading
+            def brand_shortcut():
+                try:
+                    from windows_launcher import shortcut
+                    shortcut(Path(root))
+                except Exception:
+                    pass
+            threading.Thread(target=brand_shortcut, daemon=True).start()
         if smoke:
+            plugin_folder = os.environ.get('COSMERE_REAPLUGS_TEST_DIR')
+            if plugin_folder:
+                import vst2_host
+                plugin = next(Path(plugin_folder).rglob('reaeq-standalone.dll'))
+                host = vst2_host.Host(plugin)
+                try:
+                    if len(host.audio(bytes(1024))) != 1024:
+                        raise RuntimeError('Frozen VST2 processing failed')
+                    host.restore(host.capture())
+                finally:
+                    host.close()
             # Exercise actual frozen FFmpeg capture and discard without devices.
             import tempfile
             import time
@@ -89,4 +113,3 @@ def run():
 
 if __name__ == '__main__':
     sys.exit(run())
-

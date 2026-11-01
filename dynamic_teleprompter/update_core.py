@@ -114,7 +114,16 @@ class GitHub:
                    'X-GitHub-Api-Version': '2022-11-28'}
         if self.token:
             headers['Authorization'] = 'Bearer ' + self.token
-        return self.opener.open(urllib.request.Request(url, headers=headers), timeout=30)
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            return self.opener.open(request, timeout=30)
+        except urllib.error.HTTPError as error:
+            if self.token and error.code in (401, 403):
+                # An expired optional credential must not block public releases.
+                self.token = ''
+                request.remove_header('Authorization')
+                return self.opener.open(request, timeout=30)
+            raise
 
     def json(self, url):
         with self.open(url) as response:
@@ -360,4 +369,3 @@ def install_lock(root, wait=False):
             if os.name == 'nt':
                 stream.seek(0)
                 msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-
