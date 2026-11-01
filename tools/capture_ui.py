@@ -29,10 +29,55 @@ def main():
         module.MainWindow.arrange_windows = lambda self: None
         module.lip_microphone.start = lambda *args, **kwargs: None
         window = module.MainWindow()
-        window.resize(1280, 900)
+        # Exercise the relocated toolbar's actual signal connections and the
+        # confirmation gate with synthetic canvas frames, without audio devices.
+        import time
+        from unittest.mock import patch
+        original_directory = window.record_dir
+        window.record_microphone.setChecked(False)
+        for discard in (False, True):
+            destination = local / ('discard' if discard else 'save')
+            window.record_dir = str(destination)
+            def fail_dialog(parent, title, message, *args):
+                raise RuntimeError(title + ': ' + message)
+            with patch.object(QMessageBox, 'warning', side_effect=fail_dialog):
+                window.record_toggle.click()
+            recorder = window.recorder
+            assert recorder is not None and not recorder.error
+            assert window.record_caption.text() == 'Stop / Save'
+            if discard:
+                with patch.object(QMessageBox, 'exec', return_value=QMessageBox.StandardButton.Cancel):
+                    window.record_discard.click()
+                assert not recorder.stopping and not recorder.cancelled
+                with patch.object(QMessageBox, 'exec', return_value=QMessageBox.StandardButton.Discard):
+                    window.record_discard.click()
+                assert recorder.cancelled
+            else:
+                window.record_toggle.click()
+                assert recorder.stopping and not recorder.cancelled
+            deadline = time.monotonic() + 20
+            with patch.object(QMessageBox, 'information'), patch.object(QMessageBox, 'warning'):
+                while window.recorder is not None and time.monotonic() < deadline:
+                    application.processEvents()
+                    time.sleep(.02)
+            assert window.recorder is None and not recorder.error, recorder.error
+            assert bool(list(destination.glob('*.mp4'))) != discard
+            assert window.record_toggle.isEnabled() and not window.record_discard.isEnabled()
+        window.record_dir = original_directory
+        window.record_microphone.setChecked(True)
+        assert window.start_voice_following.isChecked()
+        window.start_voice_following.setChecked(False)
+        defaults = window.settings()
+        window.start_voice_following.setChecked(True)
+        window.apply_settings_values(defaults)
+        assert not window.start_voice_following.isChecked()
+        window.start_voice_following.setChecked(True)
+        window.resize(int(os.environ.get('COSMERE_UI_WIDTH', '1280')), int(os.environ.get('COSMERE_UI_HEIGHT', '900')))
         window.show()
         output = ROOT / 'build/ui-preview'
         output.mkdir(parents=True, exist_ok=True)
+        for previous in output.glob('*.png'):
+            previous.unlink()
         top = window.centralWidget().findChild(QTabWidget)
         counter = 0
         def capture(name):
@@ -73,6 +118,7 @@ def main():
         window._saved_project_snapshot = window._project_snapshot()
         window.close()
         application.processEvents()
+        print('Playback toolbar Save/Discard/confirmation and startup defaults verified.')
         print('Captured', len(list(output.glob('*.png'))), 'real Qt UI views in', output)
 
 

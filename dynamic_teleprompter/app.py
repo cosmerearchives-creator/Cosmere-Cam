@@ -26,7 +26,7 @@ from audio_monitor import AudioMonitor
 from audio_diagnostics import snapshot as audio_diagnostics_snapshot, reset as reset_audio_diagnostics
 from audio_effects import DEFAULT_CHAIN, normalize_chain, EFFECT_NAMES, vst3_backend_available, plugin_errors, inspect_vst3_parameters
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, Signal, QThread, QEvent, QPoint, QSettings
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, Signal, QThread, QEvent, QPoint, QSettings, QSize
 from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut, QTextCursor, QTextCharFormat, QSyntaxHighlighter, QPainter, QPainterPath, QPen, QTextDocument, QIcon, QPixmap, QImage, QTransform
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox,
@@ -2570,7 +2570,7 @@ class MainWindow(QMainWindow):
             self.record_microphone.setEnabled(False)
             self.canvas_resolution.setEnabled(False)
             self.canvas_fps.setEnabled(False)
-            self.record_toggle.setText('■ Stop Canvas Recording')
+            self._set_recording_button(True)
             self.record_discard.setEnabled(True)
             self.audio_chain.setEnabled(False)
             self.record_status.setText('Recording: ' + str(filename))
@@ -2658,7 +2658,7 @@ class MainWindow(QMainWindow):
         self.record_discard.setEnabled(False)
         self.audio_chain.setEnabled(True)
         self.record_toggle.setEnabled(True)
-        self.record_toggle.setText('● Start Canvas Recording')
+        self._set_recording_button(False)
         self.record_microphone.setEnabled(True)
         if self.monitor_toggle.isChecked():
             self._start_monitor(external=False)
@@ -2674,6 +2674,38 @@ class MainWindow(QMainWindow):
                                        (recorder.path, recorder.frame_count, recorder.late_frames))
             QMessageBox.information(self, 'Recording saved',
                                     str(recorder.path) + '\n\nDiagnostics: ' + str(recorder.report_path))
+
+    @staticmethod
+    def _move_form_rows(source, target, count):
+        for _ in range(min(count, source.rowCount())):
+            row = source.takeRow(0)
+            label = row.labelItem.widget() if row.labelItem else None
+            field = row.fieldItem.widget() or row.fieldItem.layout()
+            if isinstance(field, QLabel):
+                field.setWordWrap(True)
+            if label:
+                target.addRow(label, field)
+            else:
+                target.addRow(field)
+
+    def _set_recording_button(self, recording):
+        caption = 'Stop / Save' if recording else 'Start\nRecording'
+        self.record_caption.setText(caption)
+        self.record_toggle.setAccessibleName(caption.replace('\n', ' '))
+        self.record_toggle.setToolTip('Stop and save this take' if recording else 'Start canvas recording')
+        if recording:
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop)
+        else:
+            pixmap = QPixmap(32, 32)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor('#FF443B'))
+            painter.drawEllipse(4, 4, 24, 24)
+            painter.end()
+            icon = QIcon(pixmap)
+        self.record_toggle.setIcon(icon)
 
     def build_ui(self):
         central = QWidget()
@@ -2709,90 +2741,74 @@ class MainWindow(QMainWindow):
         self.load_btn.clicked.connect(self.open_script)
         self.project_label = QLabel('Unsaved project')
 
-        # Bottom bar: slide/navigation actions, slim live level meter and
-        # presentation startup in a single row.
-        bottom = QHBoxLayout()
-        bottom.setSpacing(9)
-        left = QVBoxLayout()
-        left.setSpacing(5)
-        nav_top = QHBoxLayout()
-        prep = QPushButton('Prepare / Reset Script')
-        prep.clicked.connect(self.prepare_groups)
-        nav_top.addWidget(prep)
-        clear_button = QPushButton('Clear Output')
-        clear_button.clicked.connect(self.clear_output)
-        nav_top.addWidget(clear_button)
-        left.addLayout(nav_top)
-        nav_bottom = QHBoxLayout()
-        prev = QPushButton('Previous')
-        prev.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
-        prev.clicked.connect(self.previous)
-        nav_bottom.addWidget(prev)
-        nxt = QPushButton('Next')
-        nxt.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowForward))
-        nxt.clicked.connect(self.next)
-        nav_bottom.addWidget(nxt)
+        # Compact playback toolbar shares the actual recorder controls.
+        toolbar = QWidget()
+        toolbar.setMinimumHeight(100)
+        bottom = QHBoxLayout(toolbar)
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(6)
+        def toolbar_control(caption, icon, callback, attribute=None):
+            column = QVBoxLayout()
+            column.setSpacing(4)
+            button = QPushButton()
+            button.setObjectName('playbackButton')
+            button.setFixedSize(56, 42)
+            button.setIconSize(QSize(28, 28))
+            button.setIcon(self.style().standardIcon(icon))
+            button.setToolTip(caption.replace('\n', ' '))
+            button.setAccessibleName(caption.replace('\n', ' '))
+            button.clicked.connect(callback)
+            column.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
+            label = QLabel(caption)
+            label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+            label.setFixedWidth(78)
+            label.setMinimumHeight(36)
+            column.addWidget(label)
+            bottom.addLayout(column)
+            if attribute:
+                setattr(self, attribute, button)
+            return button, label
+        toolbar_control('Previous', QStyle.StandardPixmap.SP_ArrowBack, self.previous)
+        toolbar_control('Next', QStyle.StandardPixmap.SP_ArrowForward, self.next)
+        toolbar_control('Refresh', QStyle.StandardPixmap.SP_BrowserReload, self.prepare_groups)
         self.progress = QLabel('0 / 0')
-        nav_bottom.addWidget(self.progress)
-        left.addLayout(nav_bottom)
-        bottom.addLayout(left, 1)
-
-        mic_panel = QWidget()
-        mic_panel.setMinimumHeight(150)
-        mic_panel.setFixedWidth(48)
-        mic_layout = QVBoxLayout(mic_panel)
-        mic_layout.setContentsMargins(0, 0, 0, 0)
-        mic_layout.setSpacing(4)
+        self.progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.progress.setMinimumWidth(48)
+        self.progress.setFixedHeight(42)
+        bottom.addWidget(self.progress, 0, Qt.AlignmentFlag.AlignTop)
+        self.quick_listen_button, _ = toolbar_control('Voice\nTracking',
+            QStyle.StandardPixmap.SP_MediaVolume, self.toggle_listening)
+        self.quick_listen_button.setCheckable(True)
+        self.quick_listen_button.setToolTip('Start voice following')
         self.mic_indicator = QLabel('Stopped')
         self.mic_indicator.setVisible(False)
         self.mic_meter = QProgressBar()
         self.mic_meter.setOrientation(Qt.Orientation.Vertical)
-        self.mic_meter.setInvertedAppearance(False)
         self.mic_meter.setRange(0, 100)
         self.mic_meter.setValue(0)
         self.mic_meter.setTextVisible(False)
         self.mic_meter.setFixedSize(20, 55)
         self.mic_meter.setStyleSheet('QProgressBar {background:#1d2427; border:1px solid #444;} QProgressBar::chunk {background:qlineargradient(x1:0,y1:1,x2:0,y2:0,stop:0 #13b84a,stop:0.55 #8bd936,stop:0.75 #f1da26,stop:1 #ed3434);}')
-        mic_layout.addWidget(self.mic_meter, 0, Qt.AlignmentFlag.AlignHCenter)
-        self.mute_button = QPushButton('')
+        bottom.addWidget(self.mic_meter, 0, Qt.AlignmentFlag.AlignTop)
+        self.mute_button = QPushButton('Mute recognition')
         self.mute_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume))
-        self.mute_button.setObjectName('iconButton')
-        self.mute_button.setFixedSize(40, 40)
-        self.mute_button.setToolTip('Mute listening')
         self.mute_button.setEnabled(False)
         self.mute_button.clicked.connect(self.toggle_mute)
-        mic_layout.addWidget(self.mute_button)
-        self.quick_listen_button = QPushButton('')
-        self.quick_listen_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
-        self.quick_listen_button.setObjectName('iconButton')
-        self.quick_listen_button.setFixedSize(40, 40)
-        self.quick_listen_button.setToolTip('Start voice following')
-        self.quick_listen_button.clicked.connect(self.toggle_listening)
-        mic_layout.addWidget(self.quick_listen_button)
-        bottom.addWidget(mic_panel, 0, Qt.AlignmentFlag.AlignBottom)
-
-        presentation_box = QGroupBox('Presentation startup')
-        presentation_layout = QVBoxLayout(presentation_box)
-        presentation_layout.setSpacing(5)
-        self.start_presentation_button = QPushButton('Start Presentation')
-        self.start_presentation_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
-        self.start_presentation_button.setMinimumHeight(34)
-        self.start_presentation_button.clicked.connect(self.start_presentation)
-        presentation_layout.addWidget(self.start_presentation_button)
-        self.start_first_slide = QCheckBox('Show the first slide on start')
-        self.start_first_slide.setChecked(True)
-        presentation_layout.addWidget(self.start_first_slide)
-        self.start_voice_following = QCheckBox('Initiate Voice Following')
-        self.start_voice_following.setChecked(True)
-        presentation_layout.addWidget(self.start_voice_following)
-        presentation_box.setFixedWidth(250)
-        bottom.addWidget(presentation_box, 0, Qt.AlignmentFlag.AlignBottom)
-        page.addLayout(bottom)
-
+        self.record_toggle, self.record_caption = toolbar_control('Start\nRecording',
+            QStyle.StandardPixmap.SP_MediaStop, self._toggle_recording)
+        self._set_recording_button(False)
+        self.record_discard, _ = toolbar_control('Cancel\nRecording',
+            QStyle.StandardPixmap.SP_TrashIcon, self._discard_recording)
+        self.record_discard.setEnabled(False)
+        self.record_discard.setToolTip('Discard this take without saving (confirmation required)')
+        bottom.addStretch(1)
         self.current = QLabel('Current group appears here.')
         self.current.setWordWrap(True)
+        self.current.setMinimumSize(150, 55)
+        self.current.setMaximumWidth(320)
         self.current.setStyleSheet('padding: 10px; border: 0; border-radius: 12px; background: #29262F; color: #F7F5F0;')
-        page.addWidget(self.current)
+        bottom.addWidget(self.current, 2, Qt.AlignmentFlag.AlignTop)
+        page.addWidget(toolbar)
         self.mic_decay_timer = QTimer(self)
         self.mic_decay_timer.setInterval(250)
         self.mic_decay_timer.timeout.connect(self.update_mic_indicator)
@@ -2828,7 +2844,7 @@ class MainWindow(QMainWindow):
         self.lines.valueChanged.connect(self.prepare_groups)
         form.addRow('Maximum visible lines:', self.lines)
         # Specialized pages keep canvas, typography and recording discoverable.
-        canvas_page = QWidget(); canvas_form = QFormLayout(canvas_page)
+        canvas_page = QWidget(); canvas_form = QFormLayout()
         record_page = QWidget(); record_form = QFormLayout(record_page)
         text_style_page = QWidget(); text_style_form = QFormLayout(text_style_page)
         self.font_picker = QFontComboBox()
@@ -2996,15 +3012,6 @@ class MainWindow(QMainWindow):
         self.ffmpeg_label.setWordWrap(True)
         record_form.addRow('Encoder found:', self.ffmpeg_label)
         self.update_ffmpeg_label()
-        self.record_toggle = QPushButton('● Start Canvas Recording')
-        self.record_toggle.setProperty('role', 'primary')
-        self.record_toggle.clicked.connect(self._toggle_recording)
-        record_form.addRow('Recorder:', self.record_toggle)
-        self.record_discard = QPushButton('Discard Recording…')
-        self.record_discard.setProperty('role', 'danger')
-        self.record_discard.setEnabled(False)
-        self.record_discard.clicked.connect(self._discard_recording)
-        record_form.addRow('Bad take:', self.record_discard)
         self.record_status = QLabel('Ready — FFmpeg required. Save as MP4 (H.264 + optional AAC audio).')
         self.record_status.setWordWrap(True)
         record_form.addRow('Status:', self.record_status)
@@ -3115,7 +3122,19 @@ class MainWindow(QMainWindow):
         animation_scroll.setWidgetResizable(True)
         animation_inner = QWidget()
         animation_layout = QVBoxLayout(animation_inner)
-        animation_layout.addWidget(QLabel('Set independent entrance and exit animations. Letter, word, or phrase timing can be customized.'))
+        intro = QLabel('Set independent entrance and exit animations. Letter, word, or phrase timing can be customized.')
+        intro.setWordWrap(True)
+        animation_layout.addWidget(intro)
+        animation_columns = QHBoxLayout()
+        animation_columns.setSpacing(12)
+        animation_sections = []
+        for heading in ('Animation and Behaviour', 'Timing and Slide Overrides', 'Preview and Reading Test'):
+            group = QGroupBox(heading)
+            column = QVBoxLayout(group)
+            animation_columns.addWidget(group, 1)
+            animation_sections.append(column)
+        animation_layout.addLayout(animation_columns)
+        animation_layout.addStretch()
         animation_form = QFormLayout()
         self.motion_scope = QComboBox()
         self.motion_scope.addItems(['Entire presentation', 'Slide range'])
@@ -3154,7 +3173,8 @@ class MainWindow(QMainWindow):
         self.motion_hold.setSuffix(' seconds')
         animation_form.addRow('Minimum hold after entrance:', self.motion_hold)
         self.motion_hold.setToolTip('In voice-following, the current slide remains visible for at least this long after its entrance completes.')
-        self.motion_speech_gate = QCheckBox('Reveal only spoken words during voice-following')
+        self.motion_speech_gate = QCheckBox('Reveal only spoken words')
+        self.motion_speech_gate.setToolTip('During voice-following, reveal words as they are spoken.')
         self.motion_speech_gate.setChecked(True)
         animation_form.addRow('Speech-gated reveal:', self.motion_speech_gate)
         motion_range = QHBoxLayout()
@@ -3167,23 +3187,32 @@ class MainWindow(QMainWindow):
         motion_range.addWidget(QLabel('To'))
         motion_range.addWidget(self.motion_last)
         animation_form.addRow('Slide range:', motion_range)
-        animation_layout.addLayout(legacy_animation_form)
-        animation_layout.addLayout(animation_form)
+        selection_form = QFormLayout()
+        self._move_form_rows(animation_form, selection_form, 4)
+        for target in (legacy_animation_form, selection_form, animation_form):
+            target.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        animation_sections[0].addLayout(legacy_animation_form)
+        animation_sections[0].addLayout(selection_form)
+        animation_sections[0].addStretch()
+        animation_sections[1].addLayout(animation_form)
         motion_apply = QPushButton('Apply Animations')
         motion_apply.clicked.connect(self.apply_animations)
-        animation_layout.addWidget(motion_apply)
-        motion_remove = QPushButton('Remove Slide-Range Animation Overrides')
+        animation_sections[1].addWidget(motion_apply)
+        motion_remove = QPushButton('Remove Range Overrides')
         motion_remove.clicked.connect(self.remove_animation_overrides)
-        animation_layout.addWidget(motion_remove)
+        animation_sections[1].addWidget(motion_remove)
         self.motion_status = QLabel('Select and apply animations. Existing text will animate on the next slide transition.')
         self.motion_status.setWordWrap(True)
-        animation_layout.addWidget(self.motion_status)
-        test_box = QGroupBox('Animation preview & five-slide reading test')
+        animation_sections[1].addWidget(self.motion_status)
+        animation_sections[1].addStretch()
+        test_box = QWidget()
         test_layout = QVBoxLayout(test_box)
-        test_layout.addWidget(QLabel('Preview text (does not change your script or live OBS output):'))
+        preview_help = QLabel('Preview text (does not change your script or live OBS output):')
+        preview_help.setWordWrap(True)
+        test_layout.addWidget(preview_help)
         self.animation_sample = QLineEdit('The ancient kingdom hides a remarkable secret.')
         test_layout.addWidget(self.animation_sample)
-        preview_row = QHBoxLayout()
+        preview_row = QVBoxLayout()
         preview_button = QPushButton('Preview Current Animation')
         preview_button.clicked.connect(self.preview_animation)
         preview_row.addWidget(preview_button)
@@ -3196,8 +3225,9 @@ class MainWindow(QMainWindow):
         test_layout.addLayout(preview_row)
         self.animation_test_status = QLabel('Preview and test use your current animation controls.')
         test_layout.addWidget(self.animation_test_status)
-        animation_layout.addWidget(test_box)
-        animation_layout.addStretch()
+        self.animation_test_status.setWordWrap(True)
+        animation_sections[2].addWidget(test_box)
+        animation_sections[2].addStretch()
         animation_scroll.setWidget(animation_inner)
         animation_page_layout = QVBoxLayout(animation_page)
         animation_page_layout.addWidget(animation_scroll)
@@ -3242,6 +3272,7 @@ class MainWindow(QMainWindow):
         self.listen_button = QPushButton('Start Voice Following')
         self.listen_button.clicked.connect(self.toggle_listening)
         voice_layout.addWidget(self.listen_button)
+        voice_layout.addWidget(self.mute_button)
         self.tracking_mode = QComboBox()
         self.tracking_mode.addItems(['Automatic', 'Manual', 'Hybrid (voice + manual correction)'])
         voice_layout.addWidget(QLabel('Tracking mode (Automatic is default):'))
@@ -3263,13 +3294,23 @@ class MainWindow(QMainWindow):
         # Four top-level tabs. Tabs are rearranged here so the controls and
         # signal connections above remain unchanged from v0.2.12.
         voice_tabs = QTabWidget()
+        voice_tabs.addTab(self._scroll_page(record_page), 'Recording')
         voice_tabs.addTab(self._scroll_page(voice_page), 'Voice Tracking')
         voice_tabs.addTab(self._scroll_page(self.speech_demo), 'Speech Test')
-        tabs.addTab(voice_tabs, 'Voice Tracking')
+        tabs.addTab(voice_tabs, 'Microphone')
         output_tabs = QTabWidget()
         output_tabs.addTab(self._scroll_page(settings_page), 'Content')
-        output_tabs.addTab(self._scroll_page(canvas_page), 'Canvas & Layers')
-        output_tabs.addTab(self._scroll_page(record_page), 'Recording')
+        canvas_columns = QHBoxLayout(canvas_page)
+        for heading, count in (('Background and Layers', 6), ('Canvas and Performance', canvas_form.rowCount())):
+            group = QGroupBox(heading)
+            column = QVBoxLayout(group)
+            target = QFormLayout()
+            target.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+            self._move_form_rows(canvas_form, target, count)
+            column.addLayout(target)
+            column.addStretch()
+            canvas_columns.addWidget(group, 1)
+        output_tabs.addTab(self._scroll_page(canvas_page), 'Canvas')
         # A single compact two-column Text Effects page, with a full-width sample.
         combined_text_page = QWidget()
         combined_layout = QVBoxLayout(combined_text_page)
@@ -3315,6 +3356,18 @@ class MainWindow(QMainWindow):
         settings_home_layout = QVBoxLayout(settings_home)
         settings_home_layout.addWidget(QLabel('Application settings and project information'))
         settings_home_layout.addWidget(self.project_label)
+        startup_box = QGroupBox('Presentation startup')
+        startup_layout = QVBoxLayout(startup_box)
+        self.start_first_slide = QCheckBox('Show the first slide on start')
+        self.start_first_slide.setChecked(True)
+        startup_layout.addWidget(self.start_first_slide)
+        self.start_voice_following = QCheckBox('Initiate Voice Following on Presentation Start')
+        self.start_voice_following.setChecked(True)
+        startup_layout.addWidget(self.start_voice_following)
+        self.start_presentation_button = QPushButton('Start Presentation')
+        self.start_presentation_button.clicked.connect(self.start_presentation)
+        startup_layout.addWidget(self.start_presentation_button)
+        settings_home_layout.addWidget(startup_box)
         settings_home_layout.addWidget(self.dictionary_button)
         save_display = QPushButton('Save Display Settings as Defaults')
         save_display.clicked.connect(self.save_settings)
@@ -3813,9 +3866,10 @@ class MainWindow(QMainWindow):
     def set_listen_button_text(self, label):
         self.listen_button.setText(label)
         active = label.startswith('Stop')
-        self.quick_listen_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause if active else QStyle.StandardPixmap.SP_MediaPlay))
+        self.quick_listen_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume if active else QStyle.StandardPixmap.SP_MediaVolumeMuted))
+        self.quick_listen_button.setChecked(active)
         self.quick_listen_button.setToolTip('Stop voice following' if active else 'Start voice following')
-        self.quick_listen_button.setStyleSheet('color:#148f47; font-weight:bold;' if active else 'color:#b35d26; font-weight:bold;')
+
 
     def start_presentation(self):
         """Prepare exactly once; opening voice recognition must not reset slide one."""
@@ -4088,7 +4142,9 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def settings(self):
-        return dict(mode=self.mode.currentText(), grouping=self.grouping.currentText(),
+        return dict(first_slide=self.start_first_slide.isChecked(),
+                    voice_following=self.start_voice_following.isChecked(),
+                    mode=self.mode.currentText(), grouping=self.grouping.currentText(),
                     group_limit=self.group_limit.value(), chars=self.chars.value(),
                     lines=self.lines.value(), font=self.font_picker.currentFont().family(),
                     font_size=self.font_size.value(), bold=self.bold.isChecked(),
@@ -4437,6 +4493,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Project open error', str(exc))
 
     def apply_settings_values(self, values):
+        self.start_first_slide.setChecked(bool(values.get('first_slide', True)))
+        self.start_voice_following.setChecked(bool(values.get('voice_following', True)))
         # Signal blocking prevents reconstructing pages with half-loaded settings.
         widgets = ((self.mode, 'mode'), (self.grouping, 'grouping'),
                    (self.align, 'align'), (self.animation, 'animation'),

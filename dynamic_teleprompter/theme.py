@@ -33,6 +33,7 @@ QPushButton[role="danger"] { background: #F6E2E3; color: #8B3443; border-color: 
 QPushButton[role="danger"]:hover { background: #EDCDD4; }
 QPushButton[role="primary"]:disabled, QPushButton[role="danger"]:disabled {
     background: #E5E2DE; color: #9C969E; border-color: #DDD9D5; }
+QPushButton#playbackButton { padding: 0; border-radius: 10px; min-height: 0; }
 QPushButton#iconButton { padding: 0; border-radius: 20px; min-height: 0; }
 QTabWidget::pane { border: 1px solid #DDD5E3; border-radius: 16px; background: #F7F5F0; padding: 8px; }
 QTabBar::tab { background: #E9E4EC; color: #6B6174; border: 0;
