@@ -76,8 +76,17 @@ def kept_segments(duration, silences, internal=False, padding=.15):
 
 
 def run(command, **kwargs):
-    return subprocess.run(command, check=True, capture_output=True, timeout=600,
-                          creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), **kwargs)
+    try:
+        return subprocess.run(command, check=True, capture_output=True, timeout=600,
+                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), **kwargs)
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.decode('utf-8', 'replace') if exc.stderr else str(exc)
+        if '-/filter_complex' in command and 'Unrecognized option' in detail:
+            # Older user-supplied FFmpeg versions predate file-valued options.
+            legacy = list(command)
+            legacy[legacy.index('-/filter_complex')] = '-filter_complex_script'
+            return run(legacy, **kwargs)
+        raise RuntimeError('Recording processing failed: ' + detail[-2000:]) from exc
 
 
 def process_recording(source, ffmpeg, options, script, model_path, duration, directory, progress):
@@ -113,7 +122,7 @@ def process_recording(source, ffmpeg, options, script, model_path, duration, dir
             graph.write_text(';'.join(filters), encoding='utf-8')
             target = Path(directory) / 'trimmed.mp4'
             run([ffmpeg, '-y', '-hide_banner', '-loglevel', 'error', '-i', str(current),
-                '-filter_complex_script', str(graph), '-map', '[v]', '-map', '[a]',
+                '-/filter_complex', str(graph), '-map', '[v]', '-map', '[a]',
                 '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-c:a', 'aac',
                 '-movflags', '+faststart', str(target)])
             current = target

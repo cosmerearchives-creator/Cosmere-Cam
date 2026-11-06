@@ -2767,6 +2767,7 @@ class MainWindow(QMainWindow):
         if not self.recorder.error:
             self.recorder.processing_options = ProcessingChoices(self, self.recorder.microphone,
                                                                  model_is_installed()).options()
+        self.record_caption.setText('Saving…')
         self.recorder.finish_async()
         self.record_finish_timer.start()
 
@@ -2798,6 +2799,8 @@ class MainWindow(QMainWindow):
         if recorder is None or not recorder.finished:
             if recorder is not None and recorder.processing_stage:
                 self.record_status.setText(recorder.processing_stage)
+                self.record_caption.setText('Processing…')
+                self.record_toggle.setToolTip(recorder.processing_stage)
             return
         self.record_finish_timer.stop()
         self.recorder = None

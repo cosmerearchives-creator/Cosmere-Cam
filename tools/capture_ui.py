@@ -57,7 +57,10 @@ def main():
                     window.record_discard.click()
                 assert recorder.cancelled
             else:
-                with patch.object(ProcessingChoices, 'options', return_value={}):
+                def choose():
+                    assert recorder.stopping and not recorder._finish_started
+                    return {}
+                with patch.object(ProcessingChoices, 'options', side_effect=choose):
                     window.record_toggle.click()
                 assert recorder.stopping and not recorder.cancelled
             deadline = time.monotonic() + 20
