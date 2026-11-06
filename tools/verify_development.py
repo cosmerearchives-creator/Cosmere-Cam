@@ -119,7 +119,9 @@ def main():
             folder = ROOT/'build/alignment-test'
             folder.mkdir(parents=True,exist_ok=True)
             archive = folder/'model.zip'
-            urllib.request.urlretrieve(app.MODEL_URL, archive)
+            with urllib.request.urlopen(app.MODEL_URL, timeout=45) as response, archive.open('wb') as output:
+                import shutil
+                shutil.copyfileobj(response, output)
             with zipfile.ZipFile(archive) as package:
                 if sum(item.file_size for item in package.infolist()) > 200_000_000:
                     raise RuntimeError('Oversized alignment model')
@@ -152,12 +154,16 @@ def main():
             results[mode+'_trim_seconds'] = round(duration,3)
         # Two real decoders plus a slow synthetic Cubism pose at portrait resolution.
         import shutil
+        bench_source = temp/'video-720p.mp4'
+        subprocess.run([ffmpeg, '-y', '-v', 'error', '-f', 'lavfi', '-i',
+            'testsrc2=size=1280x720:rate=30:duration=5', '-c:v', 'libx264',
+            '-preset', 'ultrafast', '-crf', '23', str(bench_source)], check=True, capture_output=True)
         second = temp/'second.mp4'
-        shutil.copyfile(source, second)
+        shutil.copyfile(bench_source, second)
         window.canvas_resolution.setCurrentText('1080x1920')
         window.media_layers = [dict(type='text',visible=True),
             dict(type='live2d',path='synthetic-model',visible=True),
-            dict(type='video',path=str(source),visible=True,loop=True),
+            dict(type='video',path=str(bench_source),visible=True,loop=True),
             dict(type='video',path=str(second),visible=True,loop=True)]
         window.render()
         app.VIDEO_FRAMES.shutdown()
@@ -176,6 +182,7 @@ def main():
         assert all(decoder.serial >= 30 for decoder in app.VIDEO_FRAMES.decoders.values())
         results['two_video_synthetic_model_canvas_fps'] = round(fps,2)
         results['canvas_call_mean_ms'] = round(sum(samples)/len(samples),2)
+        results['video_source_resolution'] = [1280,720]
         results['live2d_fixture_is_synthetic'] = True
         live.close_render_workers()
         window.voice_worker = None
