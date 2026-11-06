@@ -150,6 +150,10 @@ class AlignmentReview(QDialog):
                 self.table.scrollToItem(self.table.item(row, 0))
                 return
 
+    def reject(self):
+        if self.save():
+            super().reject()
+
     def closeEvent(self, event):
         if self.save():
             event.accept()

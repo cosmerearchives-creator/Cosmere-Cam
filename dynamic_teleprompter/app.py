@@ -1734,9 +1734,13 @@ class VoiceWorker(QThread):
     def __init__(self, device=None):
         super().__init__()
         self.ready_for_recording = False
+        self.reset_requested = threading.Event()
         self.device = device
         self.running = True
         self.muted = threading.Event()
+
+    def reset_recognition(self):
+        self.reset_requested.set()
 
     def set_muted(self, muted):
         if muted:
@@ -1787,6 +1791,15 @@ class VoiceWorker(QThread):
                 previous_partial = ''
                 was_muted = False
                 while self.running:
+                    if self.reset_requested.is_set():
+                        self.reset_requested.clear()
+                        recognizer = KaldiRecognizer(model, samplerate)
+                        previous_partial = ''
+                        while not audio_queue.empty():
+                            try:
+                                audio_queue.get_nowait()
+                            except queue.Empty:
+                                break
                     if self.muted.is_set():
                         was_muted = True
                         # Discard previously queued audio; muting also blocks transcription.
@@ -2678,7 +2691,12 @@ class MainWindow(QMainWindow):
             self.record_status.setText('Please wait while plugins are prepared.')
             return
         try:
-            if self.start_first_slide.isChecked() and self.awaiting_first:
+            if self.start_first_slide.isChecked():
+                self.prepare_groups()
+                self.voice_cursor = 0
+                self.heard_final = ''
+                if self.voice_worker is not None:
+                    self.voice_worker.reset_recognition()
                 self.next()
             self.render()
             directory = Path(self.record_dir)
