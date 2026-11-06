@@ -628,9 +628,16 @@ class VideoFrameCache:
         return pix
 
     def shutdown(self):
-        for decoder in self.decoders.values(): decoder.stop()
+        decoders = list(self.decoders.values())
+        for decoder in decoders:
+            decoder.stop()
+        # Kill is asynchronous on Windows. Wait for pipe cleanup and process exit
+        # before releasing projects, changing quality, or closing the application.
+        for decoder in decoders:
+            decoder.thread.join(timeout=6)
         self.decoders.clear()
         self.cache.clear()
+        return all(not decoder.thread.is_alive() for decoder in decoders)
 
 
 VIDEO_FRAMES = VideoFrameCache()

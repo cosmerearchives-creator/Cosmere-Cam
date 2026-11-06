@@ -185,6 +185,7 @@ def main():
         results['video_source_resolution'] = [1280,720]
         results['live2d_fixture_is_synthetic'] = True
         live.close_render_workers()
+        assert app.VIDEO_FRAMES.shutdown(), 'Video decoder failed to release its input file'
         window.voice_worker = None
         window._saved_project_snapshot = window._project_snapshot()
         editor.close()
