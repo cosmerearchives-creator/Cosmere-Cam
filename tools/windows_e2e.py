@@ -62,7 +62,12 @@ def main():
         before = {str(path): sha256(path) for path in user_files}
         if args.published:
             client = GitHub()  # Published updates must work without credentials.
+            import time
+            deadline = time.monotonic() + 90
             update = find_update(client, '0.0.0')
+            while (not update or update['version'] != VERSION) and time.monotonic() < deadline:
+                time.sleep(5)
+                update = find_update(client, '0.0.0')
             assert update and update['version'] == VERSION, update
             stage_update(client, update, root)
             # Real published helper, not the checkout build, installs the real downloaded payload.

@@ -111,7 +111,8 @@ class GitHub:
             raise UpdateError('Refused untrusted repository URL')
         headers = {'User-Agent': 'Cosmere-Cam-Updater/1',
                    'Accept': 'application/octet-stream' if binary else 'application/vnd.github+json',
-                   'X-GitHub-Api-Version': '2022-11-28'}
+                   'X-GitHub-Api-Version': '2022-11-28',
+                   'Cache-Control': 'no-cache'}
         if self.token:
             headers['Authorization'] = 'Bearer ' + self.token
         request = urllib.request.Request(url, headers=headers)
@@ -164,7 +165,9 @@ class GitHub:
 
 def find_update(client, current):
     """Include alpha prereleases; ignore old source-only releases and drafts."""
-    releases = client.json(API + '/releases?per_page=30')
+    # Public release lists can remain cached briefly after a publication.
+    # A unique query forces a fresh check without weakening asset verification.
+    releases = client.json(API + '/releases?per_page=30&check=' + str(time.time_ns()))
     candidates = []
     for release in releases:
         if release.get('draft'):
