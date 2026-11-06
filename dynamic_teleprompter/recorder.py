@@ -80,6 +80,13 @@ class CanvasRecorder:
         self.audio_samples = 0
         self.plugin_latency_samples = 0
         self._latency_remaining = 0
+        self.processing_options = {}
+        self.processing_result = {}
+        self.processing_error = ''
+        self.processing_stage = ''
+        self.script = ''
+        self.model_path = ''
+        self._finish_started = False
         self.report_path = self.path.with_suffix('.diagnostics.json')
 
     def start(self):
@@ -133,7 +140,7 @@ class CanvasRecorder:
         self._writer.start()
 
     def elapsed(self):
-        return time.monotonic() - self._started
+        return getattr(self, '_stopped', time.monotonic()) - self._started
 
     def frames_due(self):
         return max(0, int(self.elapsed() * self.fps) + 1 - self.frame_count)
@@ -227,10 +234,21 @@ class CanvasRecorder:
         if len(data) > skip * 2:
             self._audio_file.writeframesraw(data[skip * 2:])
 
-    def finish_async(self):
+    def pause_capture(self):
         if self.stopping:
             return
+        self._stopped = time.monotonic()
         self.stopping = True
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+
+    def finish_async(self):
+        if self._finish_started or self.cancelled:
+            return
+        self.pause_capture()
+        self._finish_started = True
         threading.Thread(target=self._finish, daemon=True).start()
 
     def diagnostic_report(self):
@@ -263,7 +281,11 @@ class CanvasRecorder:
             'encoder_queue_capacity': self._frames.maxsize,
             'microphone_duration_seconds': round(audio_seconds, 3) if audio_seconds is not None else None,
             'audio_video_duration_difference_seconds': round(audio_seconds - self.frame_count / self.fps, 3) if audio_seconds is not None else None,
+            'canvas_stage_last_ms': getattr(self, 'render_stages', {}),
+            'live2d_pose_timings': __import__('live2d_runtime').pose_diagnostics(),
             'recording_error': self.error,
+            'processing': {key: value for key, value in self.processing_result.items() if key != 'alignment'},
+            'processing_error': self.processing_error,
             'notes': 'Timing diagnostics are indicative; not a frame-perfect AV synchronization measurement.'
         }
 
@@ -291,15 +313,42 @@ class CanvasRecorder:
                 raise RuntimeError(self.error)
             if self.frame_count == 0:
                 raise RuntimeError('No frames were recorded')
+            ready = self._silent.with_name('ready.mp4')
             if self.microphone and self._wave.exists() and self._wave.stat().st_size > 44:
                 command = [self._ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
                            '-i', str(self._silent), '-i', str(self._wave),
                            '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac',
-                           '-b:a', '160k', '-shortest', '-movflags', '+faststart', str(self.path)]
+                           '-b:a', '160k', '-shortest', '-movflags', '+faststart', str(ready)]
                 subprocess.run(command, check=True, capture_output=True, timeout=180,
                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             else:
-                shutil.copyfile(self._silent, self.path)
+                shutil.copyfile(self._silent, ready)
+            selected = ready
+            if self.processing_options:
+                try:
+                    from recording_processing import process_recording
+                    selected, self.processing_result = process_recording(ready, self._ffmpeg,
+                        self.processing_options, self.script, self.model_path,
+                        self.frame_count / self.fps, ready.parent,
+                        lambda stage: setattr(self, 'processing_stage', stage))
+                except Exception as exc:
+                    self.processing_error = str(exc)
+                    selected = ready  # Optional processing must never destroy a take.
+            import os
+            # Stage beside destination so recordings on another drive also
+            # publish atomically; failed copies never appear as finished MP4s.
+            fd, staged = tempfile.mkstemp(prefix='.' + self.path.stem + '-', suffix='.partial', dir=self.path.parent)
+            try:
+                with os.fdopen(fd, 'wb') as output, Path(selected).open('rb') as source:
+                    shutil.copyfileobj(source, output)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(staged, self.path)
+            finally:
+                Path(staged).unlink(missing_ok=True)
+            if 'alignment' in self.processing_result:
+                from update_core import atomic_json
+                atomic_json(self.path.with_suffix('.alignment.json'), self.processing_result['alignment'])
         except Exception as exc:
             self.error = str(exc)
         finally:

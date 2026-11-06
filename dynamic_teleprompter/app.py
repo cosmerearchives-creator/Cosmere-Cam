@@ -321,6 +321,10 @@ class StyledOutputLabel(QLabel):
             self.update()
 
     def _unit_parts(self):
+        key = (self.text(), self.font().toString(), self.width(), self.height(),
+               self.reserved_lines, int(self.alignment()), self.motion.get('unit', 'Phrase'))
+        if key == getattr(self, '_parts_key', None):
+            return self._parts_cache
         parts = []
         fm = self.fontMetrics()
         lines = self.text().split('\n')
@@ -349,6 +353,7 @@ class StyledOutputLabel(QLabel):
                     path.addText(x, y, self.font(), section)
                     parts.append((path, path.boundingRect().center()))
                 x += fm.horizontalAdvance(section)
+        self._parts_key, self._parts_cache = key, parts
         return parts
 
     def _tick(self):
@@ -774,7 +779,7 @@ class LayerCanvasPreview(QWidget):
         self.main = main
         self.setMinimumSize(260, 180)
         self.setMouseTracking(True)
-        self.setToolTip('Drag here to move the selected media layer (including Live2D)')
+        self.setToolTip('Drag to move the selected layer, including Text Output. Locked layers cannot move.')
         self.start = None
 
     def content_rect(self):
@@ -896,9 +901,15 @@ class VisualLayerEditor(QDialog):
         self.preview = LayerCanvasPreview(self.main)
         self.preview.moved.connect(self.drag_layer)
         columns.addWidget(self.preview, 5)
-        right = QVBoxLayout()
-        columns.addLayout(right, 3)
+        right_widget = QWidget()
+        right = QVBoxLayout(right_widget)
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setMinimumWidth(280)
+        right_scroll.setWidget(right_widget)
+        columns.addWidget(right_scroll, 3)
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         right.addLayout(form)
         self.tracking = QCheckBox('Enable face tracking for this Live2D layer')
         self.tracking.toggled.connect(self.apply_controls)
@@ -906,6 +917,16 @@ class VisualLayerEditor(QDialog):
         self.visible = QCheckBox('Visible')
         self.visible.toggled.connect(self.apply_controls)
         form.addRow('Layer:', self.visible)
+        self.text_font = QFontComboBox()
+        self.text_size = QSpinBox()
+        self.text_size.setRange(10, 110)
+        self.text_color = QPushButton('Text color…')
+        self.text_font.currentFontChanged.connect(self.change_text_font)
+        self.text_size.valueChanged.connect(self.change_text_size)
+        self.text_color.clicked.connect(self.change_text_color)
+        form.addRow('Text font:', self.text_font)
+        form.addRow('Text size:', self.text_size)
+        form.addRow('Text color:', self.text_color)
         self.x = QDoubleSpinBox(); self.x.setRange(-200, 200); self.x.setSuffix(' %')
         self.y = QDoubleSpinBox(); self.y.setRange(-200, 200); self.y.setSuffix(' %')
         self.scale = QDoubleSpinBox(); self.scale.setRange(0.05, 10); self.scale.setSingleStep(0.1); self.scale.setValue(1)
@@ -920,7 +941,8 @@ class VisualLayerEditor(QDialog):
         self.key_color_button.clicked.connect(self.choose_key_color)
         self.tolerance = QSpinBox(); self.tolerance.setRange(0,255); self.tolerance.setValue(65)
         self.loop = QCheckBox('Loop video')
-        self.locked = QCheckBox('Lock layer position and properties')
+        self.locked = QCheckBox('Lock layer')
+        self.locked.setToolTip('Lock layer position and properties')
         self.locked.toggled.connect(self.apply_controls)
         self.chroma.toggled.connect(self.apply_controls)
         self.loop.toggled.connect(self.apply_controls)
@@ -1045,7 +1067,7 @@ class VisualLayerEditor(QDialog):
         row = self.items.currentRow()
         if row < 0 or row >= len(self.main.media_layers): return
         layer = self.main.media_layers[row]
-        if layer.get('type') not in ('image', 'video', 'live2d') or layer.get('locked'): return
+        if layer.get('type') not in ('image', 'video', 'live2d', 'text') or layer.get('locked'): return
         current = QColor(layer.get('key_color', '#00ff00'))
         selected = QColorDialog.getColor(current, self, 'Choose chroma key color')
         if not selected.isValid(): return
@@ -1179,7 +1201,7 @@ class VisualLayerEditor(QDialog):
         if row < 0 or row >= len(self.main.media_layers):
             return
         layer = self.main.media_layers[row]
-        if layer.get('type') not in ('image', 'video', 'live2d') or layer.get('locked'):
+        if layer.get('type') not in ('image', 'video', 'live2d', 'text') or layer.get('locked'):
             return
         layer['x'] = max(-200, min(200, float(layer.get('x', 0)) + dx))
         layer['y'] = max(-200, min(200, float(layer.get('y', 0)) + dy))
@@ -1200,7 +1222,15 @@ class VisualLayerEditor(QDialog):
     def select_layer(self, row):
         if row < 0 or row >= len(self.main.media_layers): return
         layer = self.main.media_layers[row]
-        editable = layer.get('type') in ('image','video','live2d')
+        editable = layer.get('type') in ('image','video','live2d','text')
+        for control in (self.text_font, self.text_size, self.text_color):
+            control.setEnabled(layer.get('type') == 'text' and not layer.get('locked', False))
+        self.text_font.blockSignals(True)
+        self.text_size.blockSignals(True)
+        self.text_font.setCurrentFont(self.main.font_picker.currentFont())
+        self.text_size.setValue(self.main.font_size.value())
+        self.text_font.blockSignals(False)
+        self.text_size.blockSignals(False)
         for widget, val in [(self.tracking, bool(layer.get('tracking', False))), (self.visible, bool(layer.get('visible', True))), (self.x, float(layer.get('x',0))),
                             (self.y,float(layer.get('y',0))), (self.scale,float(layer.get('scale',1))),
                             (self.opacity,int(layer.get('opacity',100))),
@@ -1217,16 +1247,29 @@ class VisualLayerEditor(QDialog):
             else: widget.setValue(val)
             widget.blockSignals(False)
             widget.setEnabled(editable and (widget is self.locked or not layer.get('locked', False)))
+        self.loop.setEnabled(layer.get('type') == 'video' and not layer.get('locked', False))
         self.tracking.setEnabled(layer.get('type') == 'live2d' and not layer.get('locked', False))
         self.key_color = QColor(layer.get('key_color', '#00ff00')).name()
         self.key_color_button.setText('Key color: ' + self.key_color.upper())
         self.key_color_button.setEnabled(editable and not layer.get('locked', False))
 
+    def change_text_font(self, font):
+        self.main.font_picker.setCurrentFont(font)
+        self.main.render()
+
+    def change_text_size(self, value):
+        self.main.font_size.setValue(value)
+        self.main.render()
+
+    def change_text_color(self):
+        self.main.pick_fg()
+        self.preview.update()
+
     def apply_controls(self, *_):
         row = self.items.currentRow()
         if row < 0 or row >= len(self.main.media_layers): return
         layer = self.main.media_layers[row]
-        if layer.get('type') not in ('image','video','live2d'): return
+        if layer.get('type') not in ('image','video','live2d','text'): return
         if layer.get('locked', False) and self.locked.isChecked(): return
         layer.update(tracking=self.tracking.isChecked(), visible=self.visible.isChecked(), x=self.x.value(), y=self.y.value(),
                      scale=self.scale.value(), opacity=self.opacity.value(),
@@ -1387,10 +1430,9 @@ class CanvasScene(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.set_output(['', '', ''], {})
 
-    def paintEvent(self, event):
+    def paint_background(self, painter):
         # Paint the full window, including the space between labels, on EVERY
         # repaint. Never depend on a stylesheet or on the presence of text.
-        painter = QPainter(self)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
         if self._output_transparent:
             painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
@@ -1402,7 +1444,12 @@ class CanvasScene(QWidget):
                 x = (self.width() - scaled.width()) // 2
                 y = (self.height() - scaled.height()) // 2
                 painter.drawPixmap(x, y, scaled)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         draw_media_layers(painter, self._media_layers, (self.width(), self.height()), foreground=False)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        self.paint_background(painter)
         painter.end()
 
     def set_output(self, texts, settings, transition_key=None, layout_templates=None):
@@ -1520,11 +1567,15 @@ class OutputWindow(QWidget):
         self._dirty = True
         self.update()
 
-    def render_frame(self):
+    def render_frame(self, force=False):
         """Generate native-resolution pixels, regardless of preview window size."""
+        bucket = int(time.monotonic() * max(1, self.frame_rate))
+        if not force and not self._dirty and bucket == getattr(self, '_frame_bucket', None):
+            return self._snapshot
         if self._rendering:
             return self._snapshot
         self._rendering = True
+        stage_times = {}
         started = time.perf_counter()
         try:
             width, height = self.canvas_size
@@ -1533,15 +1584,48 @@ class OutputWindow(QWidget):
             painter = QPainter(frame)
             try:
                 # PySide6 requires the targetOffset argument for the QPainter overload.
-                self.scene.render(painter, QPoint(0, 0))
+                self.scene.layout.activate()
+                self.scene.paint_background(painter)
+                stage_times['background_media_ms'] = (time.perf_counter() - started) * 1000
+                text_started = time.perf_counter()
+                layer = next((e for e in self.scene._media_layers if e.get('type') == 'text'), {})
+                if layer.get('visible', True):
+                    labels = [label for label in self.labels if not label.isHidden()]
+                    key = (width, height, tuple((label.text(), label.font().toString(),
+                           label.visual.__repr__(), label.geometry().getRect(), label.reserved_lines,
+                           label.motion.__repr__()) for label in labels))
+                    animated = any(label._phase != 'idle' for label in labels)
+                    if animated or getattr(self, '_text_was_animated', False) or key != getattr(self, '_text_key', None):
+                        text = QPixmap(width, height)
+                        text.fill(Qt.GlobalColor.transparent)
+                        tp = QPainter(text)
+                        for label in labels:
+                            label.render(tp, label.pos())
+                        tp.end()
+                        self._text_pixmap, self._text_key = text, key
+                    self._text_was_animated = animated
+                    text = filtered_pixmap(self._text_pixmap, layer)
+                    painter.save()
+                    painter.setOpacity(max(0, min(1, float(layer.get('opacity', 100)) / 100)))
+                    painter.translate(width / 2 + width * float(layer.get('x', 0)) / 100,
+                                      height / 2 + height * float(layer.get('y', 0)) / 100)
+                    scale = max(.01, float(layer.get('scale', 1)))
+                    painter.scale(scale, scale)
+                    painter.drawPixmap(-width // 2, -height // 2, text)
+                    painter.restore()
+                stage_times['text_ms'] = (time.perf_counter() - text_started) * 1000
             finally:
                 painter.end()
             # Foreground media is drawn after QWidget.render, above the text widgets.
+            foreground_started = time.perf_counter()
             overlay = QPainter(frame)
             try:
                 draw_media_layers(overlay, self.scene._media_layers, self.canvas_size, foreground=True)
             finally:
                 overlay.end()
+            stage_times['foreground_media_ms'] = (time.perf_counter() - foreground_started) * 1000
+            self.render_stages = stage_times
+            self._frame_bucket = bucket
             self._snapshot = frame
             self.render_time_ms = (time.perf_counter() - started) * 1000.0
             self.render_count += 1
@@ -1568,7 +1652,7 @@ class OutputWindow(QWidget):
                                                     Qt.TransformationMode.SmoothTransformation))
 
     def export_png(self, filename):
-        return self.render_frame().save(str(filename), 'PNG')
+        return self.render_frame(force=True).save(str(filename), 'PNG')
 
 
 MODEL_DIR = Path.home() / '.dynamic_teleprompter_models' / 'vosk-model-small-en-us-0.15'
@@ -1641,6 +1725,7 @@ class ModelDownloader(QThread):
 
 
 class VoiceWorker(QThread):
+    ready = Signal()
     recognized = Signal(str, bool)
     status = Signal(str)
     failed = Signal(str)
@@ -1648,6 +1733,7 @@ class VoiceWorker(QThread):
 
     def __init__(self, device=None):
         super().__init__()
+        self.ready_for_recording = False
         self.device = device
         self.running = True
         self.muted = threading.Event()
@@ -1695,6 +1781,8 @@ class VoiceWorker(QThread):
 
             with sd.RawInputStream(samplerate=samplerate, blocksize=800, device=self.device,
                                    dtype='int16', channels=1, callback=callback):
+                self.ready_for_recording = True
+                self.ready.emit()
                 self.status.emit('Listening — speak your script')
                 previous_partial = ''
                 was_muted = False
@@ -2543,14 +2631,60 @@ class MainWindow(QMainWindow):
         if self.recorder is not None:
             self._stop_recording()
             return
+        if getattr(self, '_record_start_pending', False):
+            return
+        if self.plugin_controller.preparing:
+            self.record_status.setText('Please wait while plugins are prepared.')
+            return
+        if self.test_voice_worker is not None and self.test_voice_worker.isRunning():
+            QMessageBox.information(self, 'Reading test running', 'Stop the reading test before recording.')
+            return
+        if self.voice_worker is not None and self.voice_worker.isRunning():
+            if getattr(self.voice_worker, 'ready_for_recording', False):
+                self._begin_recording()
+            else:
+                self._record_start_pending = True
+            return
+        if not model_is_installed():
+            QMessageBox.information(self, 'Voice tracking needs a model',
+                'Install the offline English speech model in Microphone → Voice Tracking before recording.')
+            return
+        if not self.script.toPlainText().strip():
+            QMessageBox.warning(self, 'No script', 'Paste a script before recording.')
+            return
+        self._record_start_pending = True
+        self.record_toggle.setEnabled(False)
+        self.record_status.setText('Starting voice tracking before capture…')
+        self.toggle_listening()
+
+    def _voice_record_ready(self):
+        if getattr(self, '_record_start_pending', False):
+            self._record_start_pending = False
+            self.record_toggle.setEnabled(True)
+            self._begin_recording()
+
+    def _voice_record_failed(self, message):
+        self._record_start_pending = False
+        if self.recorder is None:
+            self.record_toggle.setEnabled(True)
+        self.record_status.setText('Voice tracking failed to start: ' + message)
+        QMessageBox.warning(self, 'Microphone error', message)
+
+    def _begin_recording(self):
+        if self.recorder is not None:
+            self._stop_recording()
+            return
         if self.plugin_controller.preparing:
             self.record_status.setText('Please wait while plugins are prepared.')
             return
         try:
+            if self.start_first_slide.isChecked() and self.awaiting_first:
+                self.next()
             self.render()
             directory = Path(self.record_dir)
             directory.mkdir(parents=True, exist_ok=True)
-            stamp = time.strftime('%Y%m%d_%H%M%S')
+            from datetime import datetime
+            stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
             filename = directory / ('Dynamic_Teleprompter_' + stamp + '.mp4')
             width, height = self.out.canvas_size
             self.recorder = CanvasRecorder(filename, width, height, self.out.frame_rate,
@@ -2564,6 +2698,8 @@ class MainWindow(QMainWindow):
                 self._stop_monitor(keep_checkbox=True)
             lip_microphone.stop()
             self.recorder.audio_level_listener = lip_microphone.feed
+            self.recorder.script = self.script.toPlainText()
+            self.recorder.model_path = str(MODEL_DIR)
             self.recorder.start()
             if self.monitor_toggle.isChecked() and self.record_microphone.isChecked():
                 self._start_monitor(external=True)
@@ -2576,6 +2712,8 @@ class MainWindow(QMainWindow):
             self.record_status.setText('Recording: ' + str(filename))
             self.record_timer.start(10)
             self._capture_record_frame()
+            self._show_obs_window()
+            self.out.setFocus(Qt.FocusReason.OtherFocusReason)
         except Exception as error:
             self._stop_monitor(keep_checkbox=True)
             if self.recorder is not None:
@@ -2599,6 +2737,7 @@ class MainWindow(QMainWindow):
             frame = self.out.render_frame()
             recorder.push_frame(frame)
             recorder.note_capture((time.perf_counter() - capture_start) * 1000)
+            recorder.render_stages = dict(getattr(self.out, 'render_stages', {}))
             if recorder.error:
                 raise RuntimeError(recorder.error)
             if recorder.frame_count % max(1, recorder.fps) == 0:
@@ -2622,7 +2761,12 @@ class MainWindow(QMainWindow):
         if self.audio_monitor is not None:
             self._stop_monitor(keep_checkbox=True)
         self.record_toggle.setEnabled(False)
-        self.record_status.setText('Finalizing MP4… Please wait.')
+        self.record_status.setText('Capture stopped—choose processing options.')
+        self.recorder.pause_capture()
+        from processing_ui import ProcessingChoices
+        if not self.recorder.error:
+            self.recorder.processing_options = ProcessingChoices(self, self.recorder.microphone,
+                                                                 model_is_installed()).options()
         self.recorder.finish_async()
         self.record_finish_timer.start()
 
@@ -2652,6 +2796,8 @@ class MainWindow(QMainWindow):
     def _record_finished(self):
         recorder = self.recorder
         if recorder is None or not recorder.finished:
+            if recorder is not None and recorder.processing_stage:
+                self.record_status.setText(recorder.processing_stage)
             return
         self.record_finish_timer.stop()
         self.recorder = None
@@ -2674,6 +2820,30 @@ class MainWindow(QMainWindow):
                                        (recorder.path, recorder.frame_count, recorder.late_frames))
             QMessageBox.information(self, 'Recording saved',
                                     str(recorder.path) + '\n\nDiagnostics: ' + str(recorder.report_path))
+
+        if recorder.processing_error:
+            QMessageBox.warning(self, 'Original take saved',
+                'Optional processing could not finish. Your original take was retained.\n' + recorder.processing_error)
+        if 'alignment' in recorder.processing_result:
+            self._open_alignment_review(recorder.processing_result['alignment'],
+                                        recorder.path.with_suffix('.alignment.json'))
+
+    def _open_alignment_review(self, data, path):
+        from processing_ui import AlignmentReview
+        self.alignment_review = AlignmentReview(self, data, path)
+        self.alignment_review.show()
+
+    def open_alignment_review(self):
+        path, _ = QFileDialog.getOpenFileName(self, 'Review saved word timings', self.record_dir,
+                                             'Word alignment (*.alignment.json)')
+        if path:
+            try:
+                data = json.loads(Path(path).read_text(encoding='utf-8'))
+                if data.get('schema') != 1 or not isinstance(data.get('words'), list):
+                    raise ValueError('Not a word alignment report')
+                self._open_alignment_review(data, path)
+            except (OSError, ValueError, KeyError) as exc:
+                QMessageBox.warning(self, 'Could not open word timings', str(exc))
 
     @staticmethod
     def _move_form_rows(source, target, count):
@@ -2722,7 +2892,15 @@ class MainWindow(QMainWindow):
         main.setSpacing(14)
         title = QLabel(APP_NAME)
         title.setObjectName('suiteTitle')
-        main.addWidget(title)
+        header = QHBoxLayout()
+        header.addWidget(title)
+        support = QLabel('<a style="color:#6E5C87; text-decoration:none" href="https://ko-fi.com/cosmerearchives">Support on Ko-fi</a>')
+        support.setObjectName('supportLink')
+        support.setOpenExternalLinks(True)
+        support.setToolTip('Support Cosmere Archives on Ko-fi')
+        header.addWidget(support)
+        header.addStretch()
+        main.addLayout(header)
         tabs = QTabWidget()
         main.addWidget(tabs)
         script_page = QWidget()
@@ -2807,6 +2985,9 @@ class MainWindow(QMainWindow):
             QStyle.StandardPixmap.SP_TrashIcon, self._discard_recording)
         self.record_discard.setEnabled(False)
         self.record_discard.setToolTip('Discard this take without saving (confirmation required)')
+        self.quick_first_slide = QCheckBox('First slide')
+        self.quick_first_slide.setToolTip('Show the first slide when starting a recording or presentation')
+        bottom.addWidget(self.quick_first_slide, 0, Qt.AlignmentFlag.AlignTop)
         bottom.addStretch(1)
         self.current = QLabel('Current group appears here.')
         self.current.setWordWrap(True)
@@ -3021,6 +3202,9 @@ class MainWindow(QMainWindow):
         self.record_status = QLabel('Ready — FFmpeg required. Save as MP4 (H.264 + optional AAC audio).')
         self.record_status.setWordWrap(True)
         record_form.addRow('Status:', self.record_status)
+        review = QPushButton('Review saved word timings…')
+        review.clicked.connect(self.open_alignment_review)
+        record_form.addRow('Word alignment:', review)
 
         self.fg_btn = QPushButton('Text: #000000')
         self.fg_btn.clicked.connect(self.pick_fg)
@@ -3367,6 +3551,9 @@ class MainWindow(QMainWindow):
         self.start_first_slide = QCheckBox('Show the first slide on start')
         self.start_first_slide.setChecked(True)
         startup_layout.addWidget(self.start_first_slide)
+        self.quick_first_slide.setChecked(self.start_first_slide.isChecked())
+        self.quick_first_slide.toggled.connect(self.start_first_slide.setChecked)
+        self.start_first_slide.toggled.connect(self.quick_first_slide.setChecked)
         self.start_voice_following = QCheckBox('Initiate Voice Following on Presentation Start')
         self.start_voice_following.setChecked(True)
         startup_layout.addWidget(self.start_voice_following)
@@ -3928,12 +4115,14 @@ class MainWindow(QMainWindow):
         self.voice_worker.recognized.connect(self.on_recognized)
         self.voice_worker.input_level.connect(self.on_input_level)
         self.voice_worker.status.connect(self.voice_status.setText)
-        self.voice_worker.failed.connect(lambda message: QMessageBox.warning(self, 'Microphone error', message))
+        self.voice_worker.ready.connect(self._voice_record_ready)
+        self.voice_worker.failed.connect(self._voice_record_failed)
         self.voice_worker.finished.connect(self.on_voice_finished)
         self.set_listen_button_text('Stop Voice Following')
         self.voice_worker.start()
 
     def stop_listening(self):
+        self._record_start_pending = False
         self.voice_enabled = False
         self.voice_muted = False
         self.mute_button.setEnabled(False)
@@ -3946,6 +4135,9 @@ class MainWindow(QMainWindow):
         self.set_listen_button_text('Start Voice Following')
 
     def on_voice_finished(self):
+        self._record_start_pending = False
+        if self.recorder is None:
+            self.record_toggle.setEnabled(True)
         self.voice_enabled = False
         self.voice_muted = False
         self.mute_button.setEnabled(False)
@@ -4654,6 +4846,8 @@ class MainWindow(QMainWindow):
         lip_microphone.stop()
         stop_tracking()
         VIDEO_FRAMES.shutdown()
+        from live2d_runtime import close_render_workers
+        close_render_workers()
         self.out.close()
         self.reader.close()
         self.plugin_controller.shutdown()
@@ -4675,3 +4869,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

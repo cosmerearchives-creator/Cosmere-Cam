@@ -26,3 +26,11 @@ See [AGENTS.md](AGENTS.md) for development guidance.
 Install the official ReaPlugs 2.36 **x64** separately, then use Microphone → Recording → Add ReaPlugs / VST2. Plugin controls opens the original editor. Ordered instances, bypass and complete plugin state (including learned ReaFIR noise curves) are saved with projects/settings. Tune before recording. This is a mono voice path; MIDI, instruments, external sidechains, surround and 32-bit plugins are outside this release. Plugin failures bypass the effect.
 
 The separate native VST2 helper uses the independently reverse-engineered FST ABI under GPL-3.0-or-later. See dynamic_teleprompter/native/vst2 for license, provenance and complete source. No vendor plugin binaries are distributed.
+
+## Recording processing and text layers
+
+Start Recording waits for offline voice tracking to open the microphone, then starts capture and focuses Output for model controls. Stop ends capture and asks which optional processes to run: edge-only silence trimming, shortening internal pauses, and script-to-speech word alignment. Save without processing remains available; Discard skips every processing stage. Optional processing failures retain the original take.
+
+Word alignment writes a `.alignment.json` sidecar and opens a full-script timing review. Unmatched words are interpolated between reliable neighbors, retained in full and flagged for approval. This estimates script timings; it does not measure audio/video offset or prove missing words were spoken. Saved reviews can be reopened from Microphone → Recording.
+
+Text Output in the Visual Layer Editor supports transforms, opacity, color filters, font/size/color and drag positioning. Layer locks apply to text. Background Cubism pose rendering uses QImage workers; the canvas shares frames between preview/recording and caches idle text. Slow model pose updates may still have a lower rate than video layers. Automated performance checks use a synthetic model; licensed-model/hardware verification remains separate.

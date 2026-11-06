@@ -23,6 +23,7 @@ jobs:
       PYTHONUTF8: '1'
       QT_QPA_PLATFORM: offscreen
       COSMERE_TEST_MODE: '1'
+      COSMERE_ALIGNMENT_TEST_MODEL: ${{ github.workspace }}/build/alignment-test/vosk-model-small-en-us-0.15
       COSMERE_REAPLUGS_TEST_DIR: ${{ github.workspace }}/build/reaplugs-test/plugins
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +41,8 @@ jobs:
           python -m compileall -q dynamic_teleprompter tools tests
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -v
+      - name: Verify text editing, processing, timing review and canvas responsiveness
+        run: python tools/verify_development.py
       - name: Build real Windows application and installer
         run: |
           python tools/build_windows.py
@@ -73,6 +76,7 @@ jobs:
             dist/requirements-resolved.txt
             dist/windows-verification.json
             dist/reaplugs-verification.json
+            dist/development-verification.json
           retention-days: 30
       - name: Publish verified version as draft
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -98,7 +102,7 @@ jobs:
               exit 0
             }
           }
-          gh release create $tag dist/Cosmere-Video-Recording-Suite-Setup.exe dist/Cosmere-Cam-Windows-x64.zip dist/update-manifest.json dist/*-source.zip dist/requirements-resolved.txt dist/windows-verification.json dist/reaplugs-verification.json --target "$env:GITHUB_SHA" --title "Cosmere Video Recording Suite $tag" --notes-file dist/release-notes.md --draft --prerelease
+          gh release create $tag dist/Cosmere-Video-Recording-Suite-Setup.exe dist/Cosmere-Cam-Windows-x64.zip dist/update-manifest.json dist/*-source.zip dist/requirements-resolved.txt dist/windows-verification.json dist/reaplugs-verification.json dist/development-verification.json --target "$env:GITHUB_SHA" --title "Cosmere Video Recording Suite $tag" --notes-file dist/release-notes.md --draft --prerelease
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           "created=true" >> $env:GITHUB_OUTPUT
       - name: Verify uploaded asset hashes before publishing
