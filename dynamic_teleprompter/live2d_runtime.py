@@ -8,6 +8,8 @@ import ctypes as C
 import os
 import json
 import math
+import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt, QPointF
@@ -279,13 +281,13 @@ _last_error = {}
 # resolution, then composite the cached RGBA image at project dimensions.
 # Moving the layer still updates on every regular canvas frame.
 MAX_LIVE2D_RASTER_EDGE = 640
-MIN_LIVE2D_POSE_INTERVAL = 0.12
+MIN_LIVE2D_POSE_INTERVAL = 1 / 30
 
 
 def live2d_error(path):
     return _last_error.get(str(path), '')
 
-def draw_live2d(painter, layer, canvas_size):
+def _draw_live2d_sync(painter, layer, canvas_size):
     """Paint a cached static mesh pose; reuse across live preview and recording."""
     global _core
     path = layer.get('path', '')
@@ -296,7 +298,7 @@ def draw_live2d(painter, layer, canvas_size):
             _models[path] = _core.load(path)
         model = _models[path]
         w, h = canvas_size
-        pose = {}
+        pose = dict(layer.get('_pose_override', {}))
         if layer.get('tracking', False):
             from face_tracking import current_tracking
             pose = current_tracking()
@@ -348,7 +350,7 @@ def draw_live2d(painter, layer, canvas_size):
                 # less time updating its pose so key/mouse events stay usable.
                 model._next_mesh_update = max(
                     getattr(model, '_next_mesh_update', 0.0),
-                    time.monotonic() + min(0.75, max(MIN_LIVE2D_POSE_INTERVAL, draw_elapsed * 2.0))
+                    time.monotonic()
                 )
             finally:
                 p.end()
@@ -382,3 +384,123 @@ def draw_live2d(painter, layer, canvas_size):
         if path not in _errors:
             print(f'Live2D layer unavailable ({path}): {exc}', flush=True)
             _errors.add(path)
+
+
+
+class PoseWorker:
+    """One model owner; coalesce poses instead of queuing obsolete frames.
+
+    Workers paint QImage only. Qt widgets and QPixmap remain on the GUI thread.
+    """
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.pending = None
+        self.latest = QImage()
+        self.running = True
+        self.render_ms = 0.
+        self.updated = 0.
+        self.thread = threading.Thread(target=self.run, name='Cubism pose renderer', daemon=True)
+        self.thread.start()
+
+    def request(self, layer, size):
+        with self.condition:
+            self.pending = (layer, size)
+            self.condition.notify()
+            return self.latest, self.render_ms, self.updated
+
+    def run(self):
+        while True:
+            with self.condition:
+                self.condition.wait_for(lambda: self.pending is not None or not self.running)
+                if not self.running:
+                    return
+                layer, size = self.pending
+                self.pending = None
+            started = time.perf_counter()
+            image = QImage(*size, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(image)
+            try:
+                _draw_live2d_sync(painter, layer, size)
+            finally:
+                painter.end()
+            with self.condition:
+                self.latest = image
+                self.render_ms = (time.perf_counter() - started) * 1000
+                self.updated = time.monotonic()
+            # Bound CPU work while always taking the newest available pose.
+            time.sleep(max(0., 1 / 30 - (time.perf_counter() - started)))
+
+    def retire(self):
+        with self.condition:
+            self.running = False
+            self.condition.notify()
+    def close(self):
+        self.retire()
+        self.thread.join(timeout=5)
+
+
+_pose_workers = {}
+_retired_workers = []
+
+def close_render_workers():
+    for worker in list(_pose_workers.values()) + _retired_workers:
+        worker.close()
+    _pose_workers.clear()
+    _retired_workers.clear()
+
+
+def pose_diagnostics():
+    return {path: {'pose_render_ms': round(worker.render_ms, 2),
+            'pose_age_ms': round((time.monotonic() - worker.updated) * 1000, 2) if worker.updated else None}
+            for path, worker in _pose_workers.items()}
+
+
+def draw_live2d(painter, layer, canvas_size):
+    path = layer.get('path', '')
+    if not path:
+        return
+    # No DLL load, pose rebuild or mesh rasterization on Qt's event thread.
+    worker = _pose_workers.get(path)
+    if worker is None:
+        if len(_pose_workers) >= 4:
+            oldest = next(iter(_pose_workers))
+            retired = _pose_workers.pop(oldest)
+            retired.retire()
+            _retired_workers.append(retired)
+        worker = _pose_workers[path] = PoseWorker()
+    pose = {}
+    if layer.get('tracking', False):
+        from face_tracking import current_tracking
+        pose.update(current_tracking())
+    if layer.get('idle_enabled', False):
+        pose.update(animation_values(layer, microphone.level(), time.monotonic()))
+    if layer.get('movement', {}).get('enabled', False):
+        pose['ParamAngleY'] = float(layer.get('_movement_turn', 0)) * 30 * float(layer['movement'].get('head_strength', 65)) / 100
+    neutral = dict(type='live2d', path=path, x=0, y=0, scale=1, opacity=100, _pose_override=pose)
+    w, h = canvas_size
+    ratio = min(1., MAX_LIVE2D_RASTER_EDGE / max(w, h))
+    image, _, _ = worker.request(neutral, (max(1, round(w * ratio)), max(1, round(h * ratio))))
+    if image.isNull():
+        return
+    movement = layer.get('movement', {})
+    painter.save()
+    try:
+        painter.translate(w * float(layer.get('x', 0)) / 100, h * float(layer.get('y', 0)) / 100)
+        scale = max(0.01, float(layer.get('scale', 1)))
+        if movement.get('enabled', False):
+            far_y = float(movement.get('far_y', -35))
+            near_y = float(movement.get('near_y', 35))
+            y = float(layer.get('y', 0))
+            fraction = max(0., min(1., (y - far_y) / max(1., near_y - far_y)))
+            far_scale = float(movement.get('far_scale', 40)) / 100.
+            near_scale = float(movement.get('near_scale', 100)) / 100.
+            scale *= far_scale + (near_scale - far_scale) * fraction
+        painter.translate(w / 2, h / 2)
+        painter.scale(scale, scale)
+        painter.translate(-w / 2, -h / 2)
+        painter.setOpacity(max(0, min(1, float(layer.get('opacity', 100)) / 100)))
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawImage(QRectF(0, 0, w, h), image)
+    finally:
+        painter.restore()

@@ -33,6 +33,10 @@ def main():
         # confirmation gate with synthetic canvas frames, without audio devices.
         import time
         from unittest.mock import patch
+        from unittest.mock import Mock
+        from processing_ui import ProcessingChoices
+        window.voice_worker = Mock(ready_for_recording=True)
+        window.voice_worker.isRunning.return_value = True
         original_directory = window.record_dir
         window.record_microphone.setChecked(False)
         for discard in (False, True):
@@ -53,7 +57,11 @@ def main():
                     window.record_discard.click()
                 assert recorder.cancelled
             else:
-                window.record_toggle.click()
+                def choose():
+                    assert recorder.stopping and not recorder._finish_started
+                    return {}
+                with patch.object(ProcessingChoices, 'options', side_effect=choose):
+                    window.record_toggle.click()
                 assert recorder.stopping and not recorder.cancelled
             deadline = time.monotonic() + 20
             with patch.object(QMessageBox, 'information'), patch.object(QMessageBox, 'warning'):
@@ -98,6 +106,24 @@ def main():
         window.reader.resize(640, 720)
         application.processEvents()
         window.reader.grab().save(str(output / 'reader.png'))
+        editor = module.VisualLayerEditor(window)
+        editor.resize(1300, 800)
+        editor.show()
+        application.processEvents()
+        editor.grab().save(str(output / 'visual-layer-editor.png'))
+        editor.close()
+        from processing_ui import ProcessingChoices, AlignmentReview
+        choices = ProcessingChoices(window, True, True)
+        choices.show()
+        application.processEvents()
+        choices.grab().save(str(output / 'processing-choices.png'))
+        choices.close()
+        from recording_processing import align_script
+        review = AlignmentReview(window, align_script('All script words stay visible.', [], 4), local/'review.json')
+        review.show()
+        application.processEvents()
+        review.grab().save(str(output / 'alignment-review.png'))
+        review.close()
         window._show_menu_temporarily()
         for action in window.menuBar().actions():
             menu = action.menu()
@@ -115,6 +141,7 @@ def main():
             application.processEvents()
             dialog.grab().save(str(output / (name + '.png')))
             dialog.close()
+        window.voice_worker = None
         window._saved_project_snapshot = window._project_snapshot()
         window.close()
         application.processEvents()

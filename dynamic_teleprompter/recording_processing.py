@@ -1,0 +1,150 @@
+"""Optional recording processing. Never modifies the original input in place."""
+import json
+import re
+import subprocess
+from difflib import SequenceMatcher
+from pathlib import Path
+
+
+def align_script(script, recognized, duration):
+    tokens = re.findall(r"\S+", script)
+    def normalized(word):
+        return re.sub(r"[^\w']", '', word.casefold())
+    words = [dict(word=word, start=None, end=None, status='Estimated timing—needs approval',
+                  needs_approval=True) for word in tokens]
+    heard = [item for item in recognized if normalized(item.get('word', ''))]
+    matcher = SequenceMatcher(None, [normalized(w) for w in tokens],
+                              [normalized(w['word']) for w in heard], autojunk=False)
+    for match in matcher.get_matching_blocks():
+        for offset in range(match.size):
+            item = heard[match.b + offset]
+            if float(item.get('conf', 1)) < .65:
+                continue
+            start, end = max(0., float(item['start'])), min(duration, float(item['end']))
+            if end < start:
+                continue
+            words[match.a + offset].update(start=start, end=end, status='Matched speech', needs_approval=False)
+    cursor = 0
+    previous_end = 0.
+    while cursor < len(words):
+        if words[cursor]['start'] is not None:
+            words[cursor]['start'] = max(previous_end, words[cursor]['start'])
+            words[cursor]['end'] = max(words[cursor]['start'], words[cursor]['end'])
+            previous_end = words[cursor]['end']
+            cursor += 1
+            continue
+        last = cursor
+        while last < len(words) and words[last]['start'] is None:
+            last += 1
+        right = max(previous_end, words[last]['start'] if last < len(words) else duration)
+        weights = [max(1, len(normalized(w['word']))) for w in words[cursor:last]]
+        total = sum(weights)
+        position = previous_end
+        for item, weight in zip(words[cursor:last], weights):
+            end = position + (right - previous_end) * weight / total
+            item.update(start=position, end=end)
+            position = end
+        previous_end = right
+        cursor = last
+    return dict(schema=1, script=script, duration=duration, words=words)
+
+
+def kept_segments(duration, silences, internal=False, padding=.15):
+    """Remove edge silence; optionally shorten internal pauses, preserving padding."""
+    if any(a <= .05 and b >= duration - .05 for a, b in silences):
+        return [(0., duration)]
+    removed = []
+    for start, end in silences:
+        start, end = max(0., start), min(duration, end)
+        if end <= start:
+            continue
+        if start <= .05:
+            removed.append((0., max(0., end - padding)))
+        elif end >= duration - .05:
+            removed.append((min(duration, start + padding), duration))
+        elif internal and end - start > .6:
+            removed.append((start + padding, end - padding))
+    cursor, kept = 0., []
+    for start, end in sorted(removed):
+        if start > cursor:
+            kept.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < duration:
+        kept.append((cursor, duration))
+    # Never silently discard a fully silent recording.
+    return kept if sum(b-a for a,b in kept) > .1 else [(0., duration)]
+
+
+def run(command, **kwargs):
+    try:
+        return subprocess.run(command, check=True, capture_output=True, timeout=600,
+                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), **kwargs)
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.decode('utf-8', 'replace') if exc.stderr else str(exc)
+        if '-/filter_complex' in command and 'Unrecognized option' in detail:
+            # Older user-supplied FFmpeg versions predate file-valued options.
+            legacy = list(command)
+            legacy[legacy.index('-/filter_complex')] = '-filter_complex_script'
+            return run(legacy, **kwargs)
+        raise RuntimeError('Recording processing failed: ' + detail[-2000:]) from exc
+
+
+def process_recording(source, ffmpeg, options, script, model_path, duration, directory, progress):
+    result = dict(options=options, trim_segments=[(0., duration)])
+    current = Path(source)
+    trim = options.get('trim', 'none')
+    if trim != 'none':
+        progress('Detecting silence…')
+        detected = run([ffmpeg, '-hide_banner', '-i', str(current), '-af',
+            'silencedetect=noise=-40dB:d=0.35', '-vn', '-f', 'null', '-']).stderr.decode('utf-8', 'replace')
+        silences, start = [], None
+        for kind, value in re.findall(r'silence_(start|end):\s*([0-9.]+)', detected):
+            if kind == 'start':
+                start = float(value)
+            elif start is not None:
+                silences.append((start, float(value)))
+                start = None
+        if start is not None:
+            silences.append((start, duration))
+        segments = kept_segments(duration, silences, trim == 'pauses')
+        result['trim_segments'] = segments
+        if segments != [(0., duration)]:
+            if len(segments) > 100:
+                raise RuntimeError('Too many pauses to trim safely; original recording retained')
+            progress('Trimming recording…')
+            filters = []
+            for index, (a, b) in enumerate(segments):
+                filters.extend([f'[0:v]trim=start={a}:end={b},setpts=PTS-STARTPTS[v{index}]',
+                                f'[0:a]atrim=start={a}:end={b},asetpts=PTS-STARTPTS[a{index}]'])
+            inputs = ''.join(f'[v{i}][a{i}]' for i in range(len(segments)))
+            filters.append(inputs + f'concat=n={len(segments)}:v=1:a=1[v][a]')
+            graph = Path(directory) / 'trim.ffscript'
+            graph.write_text(';'.join(filters), encoding='utf-8')
+            target = Path(directory) / 'trimmed.mp4'
+            run([ffmpeg, '-y', '-hide_banner', '-loglevel', 'error', '-i', str(current),
+                '-/filter_complex', str(graph), '-map', '[v]', '-map', '[a]',
+                '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-c:a', 'aac',
+                '-movflags', '+faststart', str(target)])
+            current = target
+            duration = sum(b-a for a,b in segments)
+    if options.get('align'):
+        progress('Matching the full script to recorded speech…')
+        from vosk import Model, KaldiRecognizer, SetLogLevel
+        import wave
+        audio = Path(directory) / 'alignment.wav'
+        run([ffmpeg, '-y', '-hide_banner', '-loglevel', 'error', '-i', str(current),
+             '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(audio)])
+        SetLogLevel(-1)
+        recognizer = KaldiRecognizer(Model(str(model_path)), 16000)
+        recognizer.SetWords(True)
+        recognized = []
+        with wave.open(str(audio), 'rb') as stream:
+            while True:
+                block = stream.readframes(8000)
+                if not block:
+                    break
+                if recognizer.AcceptWaveform(block):
+                    recognized.extend(json.loads(recognizer.Result()).get('result', []))
+        recognized.extend(json.loads(recognizer.FinalResult()).get('result', []))
+        result['alignment'] = align_script(script, recognized, duration)
+    return current, result

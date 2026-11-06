@@ -52,6 +52,19 @@ def run():
                     host.restore(host.capture())
                 finally:
                     host.close()
+            alignment_model = os.environ.get('COSMERE_ALIGNMENT_TEST_MODEL')
+            if alignment_model:
+                from vosk import Model, KaldiRecognizer, SetLogLevel
+                from recording_processing import align_script
+                from processing_ui import ProcessingChoices, AlignmentReview
+                SetLogLevel(-1)
+                recognizer = KaldiRecognizer(Model(alignment_model), 16000)
+                recognizer.SetWords(True)
+                recognizer.AcceptWaveform(bytes(32000))
+                heard = json.loads(recognizer.FinalResult()).get('result', [])
+                aligned = align_script('Every word stays visible.', heard, 1)
+                if len(aligned['words']) != 4:
+                    raise RuntimeError('Frozen full-script alignment failed')
             # Exercise actual frozen FFmpeg capture and discard without devices.
             import tempfile
             import time

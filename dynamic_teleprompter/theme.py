@@ -18,6 +18,7 @@ QMainWindow, QDialog, QMessageBox { background: #F7F5F0; }
 QWidget#suiteRoot, QTabWidget > QWidget, QScrollArea > QWidget > QWidget { background: #F7F5F0; }
 QLabel { background: transparent; }
 QLabel#suiteTitle { font-size: 21pt; font-weight: 700; padding: 4px 0px 12px; }
+QLabel#supportLink { background: #EDE3FA; border-radius: 12px; padding: 7px 12px; }
 QLabel#sectionTitle { font-size: 15pt; font-weight: 600; padding: 6px 0px; }
 QLabel#mutedText { color: #736A7C; }
 QPushButton, QToolButton { background: #EDE3FA; border: 1px solid #DFD3EE;
