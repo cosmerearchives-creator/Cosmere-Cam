@@ -25,7 +25,7 @@ def build():
     out.mkdir(exist_ok=True)
     (ROOT / 'build').mkdir(exist_ok=True)
     version_info = ROOT / 'build/suite-version.txt'
-    version_info.write_text("VSVersionInfo(ffi=FixedFileInfo(filevers=(0,5,0,22), prodvers=(0,5,0,22), "
+    version_info.write_text("VSVersionInfo(ffi=FixedFileInfo(filevers=(0,5,0,23), prodvers=(0,5,0,23), "
         "mask=0x3f, flags=0x2, OS=0x40004, fileType=0x1, subtype=0, date=(0,0)), "
         "kids=[StringFileInfo([StringTable('040904B0', [StringStruct('CompanyName', 'Cosmere Archives'), "
         "StringStruct('FileDescription', '" + APP_NAME + "'), StringStruct('ProductName', '" + APP_NAME + "'), "

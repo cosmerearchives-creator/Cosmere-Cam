@@ -6,6 +6,9 @@ import math
 
 DEFAULT_MOVEMENT = {
     'enabled': False,
+    'model_mode': 'head',
+    'direction_models': {},
+    'release_model': 'default',
     'horizontal_speed': 30,
     'vertical_speed': 20,
     'turn_seconds': 350,
@@ -60,3 +63,26 @@ def step_motion(layer, keys, dt):
     layer['x'] = new_x
     layer['y'] = new_y
     return abs(new_turn - turn) > 1e-5 or abs(new_vertical - vertical) > 1e-5 or abs(new_x - old_x) > 1e-5 or abs(new_y - old_y) > 1e-5
+
+
+
+def select_direction_model(layer, keys, order):
+    """Choose a transient render path; keep the layer transform and original intact."""
+    settings = layer.get('movement', {})
+    previous = layer.get('_movement_model_path', '')
+    if settings.get('model_mode', 'head') == 'head':
+        layer.pop('_movement_model_path', None)
+        return bool(previous)
+    assignments = settings.get('direction_models', {})
+    direction = next((key for key in reversed(order) if key in keys), None)
+    if direction is None and keys:
+        direction = next((key for key in ('a', 'd', 'w', 's') if key in keys), None)
+    if direction is not None:
+        selected = assignments.get(direction) or layer.get('path', '')
+        layer['_movement_last_model'] = selected
+    elif settings.get('release_model', 'default') == 'last':
+        selected = layer.get('_movement_last_model') or assignments.get('default') or layer.get('path', '')
+    else:
+        selected = assignments.get('default') or layer.get('path', '')
+    layer['_movement_model_path'] = selected
+    return previous != selected
