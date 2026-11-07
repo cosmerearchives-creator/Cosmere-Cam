@@ -272,6 +272,7 @@ class CubismCore:
         return CubismMeshModel(path,self.dll)
 
 
+_model_load_lock = threading.Lock()
 _core = None
 _models = {}
 _pose_images = {}
@@ -292,10 +293,11 @@ def _draw_live2d_sync(painter, layer, canvas_size):
     global _core
     path = layer.get('path', '')
     try:
-        if _core is None:
-            _core = CubismCore()
-        if path not in _models:
-            _models[path] = _core.load(path)
+        with _model_load_lock:
+            if _core is None:
+                _core = CubismCore()
+            if path not in _models:
+                _models[path] = _core.load(path)
         model = _models[path]
         w, h = canvas_size
         pose = dict(layer.get('_pose_override', {}))
@@ -315,7 +317,7 @@ def _draw_live2d_sync(painter, layer, canvas_size):
             pose = {k: model.parameter_defaults[i] for k, i in model.parameter_indices.items()
                     if k in ('ParamAngleX', 'ParamAngleY', 'ParamAngleZ', 'ParamBodyAngleX')}
         movement = layer.get('movement', {})
-        if movement.get('enabled', False):
+        if movement.get('enabled', False) and movement.get('model_mode', 'head') != 'models':
             # A local override is intentional: keyboard movement wins over head Y tracking.
             strength = float(movement.get('head_strength', 65)) / 100.0
             pose['ParamAngleY'] = float(layer.get('_movement_turn', 0)) * 30.0 * strength
@@ -457,32 +459,50 @@ def pose_diagnostics():
 
 
 def draw_live2d(painter, layer, canvas_size):
-    path = layer.get('path', '')
+    path = layer.get('_movement_model_path') or layer.get('path', '')
     if not path:
         return
     # No DLL load, pose rebuild or mesh rasterization on Qt's event thread.
     worker = _pose_workers.get(path)
     if worker is None:
-        if len(_pose_workers) >= 4:
+        if len(_pose_workers) >= 8:
             oldest = next(iter(_pose_workers))
             retired = _pose_workers.pop(oldest)
             retired.retire()
             _retired_workers.append(retired)
         worker = _pose_workers[path] = PoseWorker()
+    movement = layer.get('movement', {})
+    warm_paths = set((movement.get('direction_models') or {}).values()) if movement.get('model_mode', 'head') != 'head' else set()
+    warm_paths.add(layer.get('path', ''))
+    warm_size = (max(1, round(canvas_size[0] * min(1., MAX_LIVE2D_RASTER_EDGE/max(canvas_size)))),
+                 max(1, round(canvas_size[1] * min(1., MAX_LIVE2D_RASTER_EDGE/max(canvas_size)))))
+    warm_key = (tuple(sorted(warm_paths)), warm_size)
+    if layer.get('_movement_warm_key') != warm_key:
+        layer['_movement_warm_key'] = warm_key
+        for warm_path in sorted(warm_paths):
+            if warm_path and warm_path not in _pose_workers and len(_pose_workers) < 8:
+                warm_worker = _pose_workers[warm_path] = PoseWorker()
+                warm_worker.request(dict(type='live2d', path=warm_path, _pose_override={}), warm_size)
     pose = {}
     if layer.get('tracking', False):
         from face_tracking import current_tracking
         pose.update(current_tracking())
     if layer.get('idle_enabled', False):
         pose.update(animation_values(layer, microphone.level(), time.monotonic()))
-    if layer.get('movement', {}).get('enabled', False):
+    if layer.get('movement', {}).get('enabled', False) and layer['movement'].get('model_mode', 'head') != 'models':
         pose['ParamAngleY'] = float(layer.get('_movement_turn', 0)) * 30 * float(layer['movement'].get('head_strength', 65)) / 100
     neutral = dict(type='live2d', path=path, x=0, y=0, scale=1, opacity=100, _pose_override=pose)
     w, h = canvas_size
     ratio = min(1., MAX_LIVE2D_RASTER_EDGE / max(w, h))
     image, _, _ = worker.request(neutral, (max(1, round(w * ratio)), max(1, round(h * ratio))))
-    if image.isNull():
-        return
+    if image.isNull() or live2d_error(path):
+        fallback = _pose_workers.get(layer.get('_movement_ready_model', layer.get('path', '')))
+        if fallback is not None and fallback is not worker:
+            image, _, _ = fallback.request(dict(type='live2d', path=layer.get('_movement_ready_model', layer.get('path', '')), _pose_override=pose), warm_size)
+        if image.isNull():
+            return
+    else:
+        layer['_movement_ready_model'] = path
     movement = layer.get('movement', {})
     painter.save()
     try:

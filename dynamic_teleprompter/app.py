@@ -20,7 +20,8 @@ from recorder import CanvasRecorder, resolve_ffmpeg
 from live2d_models import inspect_model, Live2DModelError
 from live2d_runtime import draw_live2d, live2d_error
 from live2d_idle import DEFAULT_ANIMATION, microphone as lip_microphone
-from live2d_movement import step_motion, DEFAULT_MOVEMENT
+from live2d_movement import step_motion, DEFAULT_MOVEMENT, select_direction_model
+from voice_matching import match_progress
 from face_tracking import start_tracking, stop_tracking, tracking_status, tracking_active, probe_cameras, directshow_camera_names, camera_preview, inspect_camera
 from audio_monitor import AudioMonitor
 from audio_diagnostics import snapshot as audio_diagnostics_snapshot, reset as reset_audio_diagnostics
@@ -33,7 +34,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QFontComboBox, QFormLayout, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSpinBox, QSplitter, QTabWidget, QTextEdit, QVBoxLayout,
-    QWidget, QLineEdit, QSlider, QGraphicsOpacityEffect, QProgressBar, QFrame, QMenu, QListWidget, QListWidgetItem, QDialog, QInputDialog, QStyle
+    QWidget, QLineEdit, QPlainTextEdit, QSlider, QGraphicsOpacityEffect, QProgressBar, QFrame, QMenu, QListWidget, QListWidgetItem, QDialog, QInputDialog, QStyle
 )
 
 import numpy as np
@@ -1147,15 +1148,21 @@ class VisualLayerEditor(QDialog):
         layer = self.main.media_layers[row]
         current = {**DEFAULT_MOVEMENT, **layer.get('movement', {})}
         dialog = QDialog(self)
-        dialog.setWindowTitle('Live2D — WASD Movement & Perspective')
+        dialog.setWindowTitle('Live2D — Directional Models & Movement')
         layout = QVBoxLayout(dialog)
-        intro = QLabel('W / S = move away / closer (scale changes). A / D = move left / right and turn head.\n'
+        intro = QLabel('Arrow keys (or WASD) move the character in any Suite window.\n'
                        'Release = decelerate; character stays at its new position.\n'
-                       'Keys work while Output or the non-text controls are focused.')
+                       'Text fields keep normal cursor controls. Last pressed direction wins on diagonals.')
         intro.setWordWrap(True)
         layout.addWidget(intro)
-        form = QFormLayout()
-        layout.addLayout(form)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        form = QFormLayout(content)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+        available = self.screen().availableGeometry().height() if self.screen() else 900
+        dialog.resize(650, min(760, max(400, available-80)))
         enabled = QCheckBox('Enable keyboard movement for this character')
         enabled.setChecked(bool(current['enabled']))
         form.addRow(enabled)
@@ -1180,6 +1187,28 @@ class VisualLayerEditor(QDialog):
             widget.setValue(int(value))
             controls[key] = widget
             form.addRow(caption, widget)
+        model_mode = QComboBox()
+        for caption, value in [('Head turning', 'head'), ('Directional models', 'models'), ('Head turning and models', 'both')]:
+            model_mode.addItem(caption, value)
+        model_mode.setCurrentIndex(max(0, model_mode.findData(current.get('model_mode', 'head'))))
+        form.addRow('Direction behavior:', model_mode)
+        model_selectors = {}
+        for key, caption in [('a', 'Left model'), ('d', 'Right model'), ('w', 'Up / away model'), ('s', 'Down / closer model'), ('default', 'Default / resting model')]:
+            picker = QComboBox()
+            picker.addItem('Original layer model', '')
+            for preset in self.main.model_library:
+                picker.addItem(preset['name'], preset['path'])
+            assigned = current.get('direction_models', {}).get(key, '')
+            if assigned and picker.findData(assigned) < 0:
+                picker.addItem(Path(assigned).stem + ' (not in library)', assigned)
+            picker.setCurrentIndex(max(0, picker.findData(assigned)))
+            model_selectors[key] = picker
+            form.addRow(caption + ':', picker)
+        release_mode = QComboBox()
+        release_mode.addItem('Show default model', 'default')
+        release_mode.addItem('Keep last model used', 'last')
+        release_mode.setCurrentIndex(max(0, release_mode.findData(current.get('release_model', 'default'))))
+        form.addRow('When no direction is held:', release_mode)
         hint = QLabel('For models without ParamAngleY, movement still works without head turning.\n'
                       'Live2D movements are relative to the saved layer position and native project canvas.')
         hint.setWordWrap(True)
@@ -1195,6 +1224,9 @@ class VisualLayerEditor(QDialog):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             values = {key: control.value() for key, control in controls.items()}
             values['enabled'] = enabled.isChecked()
+            values['model_mode'] = model_mode.currentData()
+            values['direction_models'] = {key: picker.currentData() for key, picker in model_selectors.items()}
+            values['release_model'] = release_mode.currentData()
             if values['far_y'] >= values['near_y'] or values['far_scale'] > values['near_scale']:
                 QMessageBox.warning(self, 'Perspective settings', 'Far boundary must be above near boundary, and far scale cannot exceed near scale.')
                 return
@@ -1737,9 +1769,12 @@ class VoiceWorker(QThread):
     status = Signal(str)
     failed = Signal(str)
     input_level = Signal(float)
+    input_peak = Signal(float)
 
-    def __init__(self, device=None):
+    def __init__(self, device=None, script='', model_path=None):
         super().__init__()
+        self.script_hint = script
+        self.model_path = model_path or MODEL_DIR
         self.ready_for_recording = False
         self.reset_requested = threading.Event()
         self.device = device
@@ -1763,9 +1798,19 @@ class VoiceWorker(QThread):
             import sounddevice as sd
             from vosk import Model, KaldiRecognizer, SetLogLevel
             SetLogLevel(-1)
-            model = Model(str(MODEL_DIR))
+            model = Model(str(self.model_path))
             samplerate = 16000
-            recognizer = KaldiRecognizer(model, samplerate)
+            def make_recognizer():
+                recognizer = KaldiRecognizer(model, samplerate)
+                words = normalized_words(self.script_hint)
+                if words and (Path(self.model_path)/'graph'/'HCLr.fst').is_file():
+                    phrases = [' '.join(words[i:i+8]) for i in range(0, min(len(words), 8000), 8)]
+                    try:
+                        recognizer.SetGrammar(json.dumps(phrases + sorted(set(words)) + ['[unk]']))
+                    except Exception:
+                        pass  # Larger static-graph models retain unrestricted recognition.
+                return recognizer
+            recognizer = make_recognizer()
             audio_queue = queue.Queue(maxsize=32)
 
             def callback(indata, frames, time_info, status):
@@ -1779,6 +1824,7 @@ class VoiceWorker(QThread):
                     sampled = samples[::step]
                     rms = math.sqrt(sum(int(x) * int(x) for x in sampled) / len(sampled))
                     self.input_level.emit(min(100.0, rms / 32768.0 * 650.0))
+                    self.input_peak.emit(max(abs(int(x)) for x in samples) / 32768.0)
                 if self.muted.is_set():
                     return
                 try:
@@ -1800,7 +1846,7 @@ class VoiceWorker(QThread):
                 while self.running:
                     if self.reset_requested.is_set():
                         self.reset_requested.clear()
-                        recognizer = KaldiRecognizer(model, samplerate)
+                        recognizer = make_recognizer()
                         previous_partial = ''
                         while not audio_queue.empty():
                             try:
@@ -1818,7 +1864,7 @@ class VoiceWorker(QThread):
                         self.msleep(60)
                         continue
                     if was_muted:
-                        recognizer = KaldiRecognizer(model, samplerate)
+                        recognizer = make_recognizer()
                         previous_partial = ''
                         was_muted = False
                     try:
@@ -2005,6 +2051,7 @@ class MainWindow(QMainWindow):
         self.local_settings = QSettings('CosmereArchives', 'DynamicTeleprompter')
         self.model_library = self._read_model_library()
         self.active_model_layer = None
+        self._movement_order = []
         self._movement_keys = set()
         self._movement_last_tick = time.monotonic()
         self._movement_target = None
@@ -2061,12 +2108,17 @@ class MainWindow(QMainWindow):
         self.build_ui()
         self.load_settings()
         self.prepare_groups()
+        self._restore_session()
+        self._session_timer = QTimer(self)
+        self._session_timer.setInterval(5000)
+        self._session_timer.timeout.connect(self._save_session)
+        self._session_timer.start()
         self._saved_project_snapshot = self._project_snapshot()
         self.update_model_status()
         QTimer.singleShot(500, self.prompt_model_if_missing)
         self.out.show()
         self.reader.show()
-        QTimer.singleShot(0, self.arrange_windows)
+        QTimer.singleShot(0, self._restore_session_windows)
 
     def arrange_windows(self):
         """Place new windows beside main app instead of behind it."""
@@ -2665,7 +2717,7 @@ class MainWindow(QMainWindow):
             else:
                 self._record_start_pending = True
             return
-        if not model_is_installed():
+        if not self._voice_model_available():
             QMessageBox.information(self, 'Voice tracking needs a model',
                 'Install the offline English speech model in Microphone → Voice Tracking before recording.')
             return
@@ -2724,7 +2776,7 @@ class MainWindow(QMainWindow):
             lip_microphone.stop()
             self.recorder.audio_level_listener = lip_microphone.feed
             self.recorder.script = self.script.toPlainText()
-            self.recorder.model_path = str(MODEL_DIR)
+            self.recorder.model_path = self.local_settings.value('voice_model_path', '', type=str) or str(MODEL_DIR)
             self.recorder.start()
             if self.monitor_toggle.isChecked() and self.record_microphone.isChecked():
                 self._start_monitor(external=True)
@@ -2791,7 +2843,7 @@ class MainWindow(QMainWindow):
         from processing_ui import ProcessingChoices
         if not self.recorder.error:
             self.recorder.processing_options = ProcessingChoices(self, self.recorder.microphone,
-                                                                 model_is_installed()).options()
+                                                                 self._voice_model_available()).options()
         self.record_caption.setText('Saving…')
         self.recorder.finish_async()
         self.record_finish_timer.start()
@@ -2929,7 +2981,7 @@ class MainWindow(QMainWindow):
         header.addWidget(support)
         header.addStretch()
         main.addLayout(header)
-        tabs = QTabWidget()
+        tabs = self.main_tabs = QTabWidget()
         main.addWidget(tabs)
         script_page = QWidget()
         page = QVBoxLayout(script_page)
@@ -3513,6 +3565,12 @@ class MainWindow(QMainWindow):
         # signal connections above remain unchanged from v0.2.12.
         voice_tabs = QTabWidget()
         voice_tabs.addTab(self._scroll_page(record_page), 'Recording')
+        model_button = QPushButton('Choose recognition model folder…')
+        model_button.clicked.connect(self._choose_voice_model)
+        voice_page.layout().addWidget(model_button)
+        default_model_button = QPushButton('Use standard small recognition model')
+        default_model_button.clicked.connect(self._reset_voice_model)
+        voice_page.layout().addWidget(default_model_button)
         voice_tabs.addTab(self._scroll_page(voice_page), 'Voice Tracking')
         voice_tabs.addTab(self._scroll_page(self.speech_demo), 'Speech Test')
         tabs.addTab(voice_tabs, 'Microphone')
@@ -3678,6 +3736,22 @@ class MainWindow(QMainWindow):
         if not self._menu_open and not any(m.isVisible() for m in self.menuBar().findChildren(QMenu)):
             self.menuBar().hide()
 
+    @staticmethod
+    def _focused_text_editor():
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QTextEdit, QPlainTextEdit, QLineEdit)):
+            return focus if not focus.isReadOnly() else None
+        # Qt reports the composite control as focus even when its editor has focus.
+        if isinstance(focus, (QSpinBox, QDoubleSpinBox)):
+            return focus.lineEdit() if not focus.isReadOnly() else None
+        if isinstance(focus, QComboBox) and focus.isEditable():
+            return focus.lineEdit() if not focus.lineEdit().isReadOnly() else None
+        return None
+
+    @staticmethod
+    def _typing_focus():
+        return MainWindow._focused_text_editor() is not None
+
     def _movement_layer(self):
         # Respect the selected layer in the editor, then the active saved character.
         editor = self.layer_editor
@@ -3700,35 +3774,54 @@ class MainWindow(QMainWindow):
             return
         # Release held keys when another application is activated (prevents stuck motion).
         active = QApplication.activeWindow()
-        permitted = (self, self.out, self.layer_editor)
-        keys = self._movement_keys if active in permitted else set()
-        if active not in permitted:
+        keys = self._movement_keys if active is not None and not self._typing_focus() else set()
+        if not keys:
             self._movement_keys.clear()
-        if step_motion(layer, keys, dt):
+            self._movement_order.clear()
+        changed = select_direction_model(layer, keys, self._movement_order)
+        if step_motion(layer, keys, dt) or changed:
             if self.layer_editor is not None and self.layer_editor.isVisible():
                 self.layer_editor.preview.update()
             # The preview/recorder timer renders the changed layer; avoid resetting text animations.
             self.out._dirty = True
 
     def eventFilter(self, watched, event):
-        # WASD is handled at the app level so it works while the Output window is active.
         kind = event.type()
-        if kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
-            keymap = {Qt.Key.Key_A:'a', Qt.Key.Key_D:'d', Qt.Key.Key_W:'w', Qt.Key.Key_S:'s'}
+        if kind in (QEvent.Type.ApplicationDeactivate, QEvent.Type.FocusIn):
+            if kind == QEvent.Type.ApplicationDeactivate or self._typing_focus():
+                self._movement_keys.clear()
+                self._movement_order.clear()
+        if kind in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            arrows = {Qt.Key.Key_Left:'a', Qt.Key.Key_Right:'d', Qt.Key.Key_Up:'w', Qt.Key.Key_Down:'s'}
+            keymap = {**arrows, Qt.Key.Key_A:'a', Qt.Key.Key_D:'d', Qt.Key.Key_W:'w', Qt.Key.Key_S:'s'}
             key = keymap.get(event.key())
-            active = QApplication.activeWindow()
-            if key and not event.isAutoRepeat() and active in (self, self.out, self.layer_editor):
-                focus = QApplication.focusWidget()
-                typing = isinstance(focus, (QTextEdit, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox))
-                modifiers = event.modifiers()
-                if not typing and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)):
-                    layer = self._movement_layer()
-                    if layer and layer.get('movement', {}).get('enabled', False):
-                        if kind == QEvent.Type.KeyPress: self._movement_keys.add(key)
-                        else: self._movement_keys.discard(key)
-                        return True
-                if kind == QEvent.Type.KeyRelease:
+            if key and QApplication.activeWindow() is not None:
+                if kind == QEvent.Type.KeyRelease and not event.isAutoRepeat():
                     self._movement_keys.discard(key)
+                    if key in self._movement_order:
+                        self._movement_order.remove(key)
+                editor = self._focused_text_editor()
+                if event.key() in arrows and editor is not None and editor is not QApplication.focusWidget():
+                    self._movement_keys.clear()
+                    self._movement_order.clear()
+                    # Keep cursor editing, without spin increments or combo selection.
+                    editor.event(event)
+                    return True
+                # Arrow navigation belongs exclusively to the model outside text inputs.
+                if not self._typing_focus() and (event.key() in arrows or not event.modifiers()):
+                    if kind == QEvent.Type.ShortcutOverride:
+                        event.accept()
+                        return True
+                    layer = self._movement_layer()
+                    if layer and layer.get('movement', {}).get('enabled') and not layer.get('locked'):
+                        if kind == QEvent.Type.KeyPress and not event.isAutoRepeat():
+                            self._movement_keys.add(key)
+                            if key in self._movement_order:
+                                self._movement_order.remove(key)
+                            self._movement_order.append(key)
+                        return True
+                    if event.key() in arrows:
+                        return True
         # Event filter on QApplication catches Alt even while script editor has focus.
         kind = event.type()
         if kind == QEvent.Type.KeyPress and (event.modifiers() & Qt.KeyboardModifier.AltModifier):
@@ -3862,7 +3955,7 @@ class MainWindow(QMainWindow):
 
     def start_animation_test(self):
         self.stop_animation_test()
-        if not model_is_installed():
+        if not self._voice_model_available():
             QMessageBox.information(self, 'Speech model required',
                                     'Install the English model to run a voice-controlled reading test.')
             return
@@ -3881,7 +3974,8 @@ class MainWindow(QMainWindow):
         self.test_heard_final = ''
         self._test_rendered_prefix = None
         win.set_output(['', '', ''], {**self._test_settings(), 'instant': True})
-        self.test_voice_worker = VoiceWorker(self.microphones.currentData())
+        self.test_voice_worker = VoiceWorker(self.microphones.currentData(), ' '.join(self.test_groups),
+                                             self.local_settings.value('voice_model_path', '', type=str) or None)
         self.test_voice_worker.recognized.connect(self._on_animation_test_recognized)
         self.test_voice_worker.failed.connect(self._on_animation_test_failed)
         self.test_voice_worker.finished.connect(self._animation_test_worker_finished)
@@ -3988,6 +4082,10 @@ class MainWindow(QMainWindow):
         self.reader.raise_()
         self.reader.activateWindow()
 
+    def _on_input_peak(self, peak):
+        if peak >= .98:
+            self._mic_clipped_until = time.monotonic() + 1.0
+
     def on_input_level(self, level):
         if not self.voice_enabled:
             return
@@ -4008,11 +4106,14 @@ class MainWindow(QMainWindow):
         elif self.voice_muted:
             self.mic_indicator.setText('● Muted — speech recognition paused')
             self.mic_indicator.setStyleSheet('color: #B08000; font-weight: bold;')
+        elif time.monotonic() < getattr(self, '_mic_clipped_until', 0):
+            self.mic_indicator.setText('● Input clipping — lower microphone gain')
+            self.mic_indicator.setStyleSheet('color: #B03030; font-weight: bold;')
         elif self.last_input_level >= 3:
             self.mic_indicator.setText('● Listening — microphone input detected')
             self.mic_indicator.setStyleSheet('color: #17813A; font-weight: bold;')
         else:
-            self.mic_indicator.setText('● Listening — no significant input detected')
+            self.mic_indicator.setText('● Listening — quiet or silent input; check microphone level')
             self.mic_indicator.setStyleSheet('color: #B05000; font-weight: bold;')
 
     def toggle_mute(self):
@@ -4035,8 +4136,12 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.voice_status.setText('Could not enumerate microphones: ' + str(exc))
 
+    def _voice_model_available(self):
+        custom = self.local_settings.value('voice_model_path', '', type=str)
+        return ((Path(custom)/'am'/'final.mdl').is_file() and (Path(custom)/'conf'/'mfcc.conf').is_file()) if custom else model_is_installed()
+
     def update_model_status(self):
-        installed = model_is_installed()
+        installed = self._voice_model_available()
         status = ('Installed — offline English recognition is ready.' if installed
                   else 'Not installed — download required for voice tracking.')
         self.model_status.setText(status)
@@ -4097,7 +4202,7 @@ class MainWindow(QMainWindow):
         if self.test_voice_worker is not None and self.test_voice_worker.isRunning():
             QMessageBox.information(self, 'Animation test running', 'Stop the reading test first.')
             return
-        if self.start_voice_following.isChecked() and not model_is_installed():
+        if self.start_voice_following.isChecked() and not self._voice_model_available():
             QMessageBox.information(self, 'Model needed', 'Install the offline English model before starting voice following.')
             return
         if not self.script.toPlainText().strip():
@@ -4115,11 +4220,34 @@ class MainWindow(QMainWindow):
             self.toggle_listening(preserve_presentation=True)
         self.start_presentation_button.setText('Restart Presentation')
 
+    def _reset_voice_model(self):
+        if self.voice_worker is not None and self.voice_worker.isRunning():
+            QMessageBox.information(self, 'Voice following active', 'Stop voice following before changing models.')
+            return
+        self.local_settings.remove('voice_model_path')
+        self.update_model_status()
+        self.voice_status.setText('Using standard small recognition model.')
+
+    def _choose_voice_model(self):
+        if self.voice_worker is not None and self.voice_worker.isRunning():
+            QMessageBox.information(self, 'Voice following active', 'Stop voice following before changing models.')
+            return
+        folder = QFileDialog.getExistingDirectory(self, 'Choose an extracted Vosk English model (larger models use more memory)')
+        if not folder:
+            return
+        root = Path(folder)
+        if not (root/'am'/'final.mdl').is_file() or not (root/'conf'/'mfcc.conf').is_file():
+            QMessageBox.warning(self, 'Invalid model folder', 'Select the extracted Vosk model folder containing am and conf.')
+            return
+        self.local_settings.setValue('voice_model_path', folder)
+        self.voice_status.setText('Recognition model: ' + root.name)
+        self.update_model_status()
+
     def toggle_listening(self, preserve_presentation=False):
         if self.voice_worker is not None and self.voice_worker.isRunning():
             self.stop_listening()
             return
-        if not model_is_installed():
+        if not self._voice_model_available():
             QMessageBox.information(self, 'Model needed', 'Download the offline English model first, then start listening.')
             return
         if not preserve_presentation:
@@ -4139,9 +4267,11 @@ class MainWindow(QMainWindow):
         self.mute_button.setEnabled(True)
         self.last_input_level = 0.0
         self.last_input_time = 0.0
-        self.voice_worker = VoiceWorker(self.microphones.currentData())
+        self.voice_worker = VoiceWorker(self.microphones.currentData(), self.script.toPlainText(),
+                                        self.local_settings.value('voice_model_path', '', type=str) or None)
         self.voice_worker.recognized.connect(self.on_recognized)
         self.voice_worker.input_level.connect(self.on_input_level)
+        self.voice_worker.input_peak.connect(self._on_input_peak)
         self.voice_worker.status.connect(self.voice_status.setText)
         self.voice_worker.ready.connect(self._voice_record_ready)
         self.voice_worker.failed.connect(self._voice_record_failed)
@@ -4192,46 +4322,11 @@ class MainWindow(QMainWindow):
         self.render()
 
     def align_voice(self, heard):
-        # Vosk's partial transcript changes continually; match a short trailing
-        # window to a nearby forward script window, rather than jumping globally.
         script_words = normalized_words(' '.join(self.groups))
-        recent = normalized_words(heard)[-14:]
-        if not recent or not script_words:
+        candidate = match_progress(script_words, normalized_words(heard)[-14:], self.voice_cursor)
+        if candidate <= self.voice_cursor:
             return
-        # IMPORTANT: Vosk often reports just one word at the beginning of a
-        # sentence. Previously we returned early on len(recent) < 2, so the
-        # single-word acceptance branch below could never run. Reveal an exact
-        # next-word match immediately, without allowing a one-word jump.
-        if len(recent) == 1:
-            if (self.voice_cursor < len(script_words)
-                    and recent[0] == script_words[self.voice_cursor]):
-                self.voice_cursor += 1
-                self._speech_gated = True
-                if not self.advance_timer.isActive():
-                    self.advance_timer.start()
-                self._process_voice_progress()
-            return
-        start = max(0, self.voice_cursor - 5)
-        end = min(len(script_words), self.voice_cursor + 38)
-        segment = script_words[start:end]
-        matcher = SequenceMatcher(None, recent, segment, autojunk=False)
-        matches = [m for m in matcher.get_matching_blocks() if m.size > 0]
-        total = sum(m.size for m in matches)
-        if total < 2 or total / len(recent) < .45:
-            # One-word interim updates are common in slow narration. Accept
-            # one recognized word only when it matches the next script word
-            # exactly; never use a lone match to jump to a later location.
-            if recent and self.voice_cursor < len(script_words) and recent[-1] == script_words[self.voice_cursor]:
-                self.voice_cursor += 1
-                self._speech_gated = True
-                if not self.advance_timer.isActive():
-                    self.advance_timer.start()
-                self._process_voice_progress()
-            return
-        last = max(start + m.b + m.size for m in matches)
-        if last > self.voice_cursor + 18:
-            return
-        self.voice_cursor = max(self.voice_cursor, last)
+        self.voice_cursor = candidate
         self._speech_gated = True
         if not self.advance_timer.isActive():
             self.advance_timer.start()
@@ -4836,6 +4931,79 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _save_session(self):
+        if not hasattr(self, 'main_tabs'):
+            return
+        try:
+            data = dict(project=self._project_payload(), project_path=str(self.project_path or ''),
+                        last_models={str(i): layer.get('_movement_last_model', '') for i,layer in enumerate(self.media_layers)},
+                        index=self.index, awaiting_first=self.awaiting_first,
+                        voice_cursor=self.voice_cursor, tab=self.main_tabs.currentIndex(),
+                        record_dir=self.record_dir, tracking_mode=self.tracking_mode.currentText(),
+                        microphone=self.microphones.currentText(),
+                        subtabs=[widget.currentIndex() for widget in self.main_tabs.findChildren(QTabWidget)],
+                        windows={name: dict(geometry=bytes(widget.saveGeometry().toBase64()).decode('ascii'),
+                                            visible=widget.isVisible())
+                                 for name, widget in [('main', self), ('output', self.out), ('reader', self.reader)]})
+            self.local_settings.setValue('previous_session_v1', json.dumps(data, ensure_ascii=False))
+            self.local_settings.sync()
+        except (OSError, TypeError, ValueError):
+            pass  # A failed checkpoint must never interrupt capture.
+
+    def _restore_session(self):
+        self._session_windows = {}
+        try:
+            raw = self.local_settings.value('previous_session_v1', '', type=str)
+            if not raw:
+                return
+            data = json.loads(raw)
+            project = data['project']
+            if project.get('format') != 'DynamicTeleprompterProject':
+                return
+            self.apply_settings_values(project['settings'])
+            for i, layer in enumerate(self.media_layers):
+                last = data.get('last_models', {}).get(str(i))
+                if last:
+                    layer['_movement_last_model'] = last
+            self.script.setPlainText(project['script'])
+            self.visual_global = dict(project.get('visual_global') or {})
+            self.slide_visuals = {int(k): dict(v) for k,v in project.get('slide_visuals', {}).items()}
+            self.global_effect_exclusions = set(project.get('global_effect_exclusions', []))
+            self.animation_global = {**ANIMATION_DEFAULT, **project.get('animation_global', {})}
+            self.animation_slides = {int(k): dict(v) for k,v in project.get('animation_slides', {}).items()}
+            self.prepare_groups()
+            self.index = max(0, min(len(self.groups), int(data.get('index', 0))))
+            self.history = self.groups[:self.index]
+            self.awaiting_first = bool(data.get('awaiting_first', True))
+            self.voice_cursor = max(0, min(len(normalized_words(' '.join(self.groups))), int(data.get('voice_cursor', 0))))
+            self.reader.set_progress(self.voice_cursor)
+            self.main_tabs.setCurrentIndex(max(0, min(self.main_tabs.count()-1, int(data.get('tab', 0)))))
+            self.project_path = Path(data['project_path']) if data.get('project_path') else None
+            self.project_label.setText(self.project_path.name if self.project_path else 'Restored session')
+            self.record_dir = str(data.get('record_dir', self.record_dir))
+            self.tracking_mode.setCurrentText(data.get('tracking_mode', 'Automatic'))
+            mic_index = self.microphones.findText(data.get('microphone', ''))
+            if mic_index >= 0:
+                self.microphones.setCurrentIndex(mic_index)
+            for widget, index in zip(self.main_tabs.findChildren(QTabWidget), data.get('subtabs', [])):
+                widget.setCurrentIndex(max(0, min(widget.count()-1, int(index))))
+            self._session_windows = data.get('windows', {})
+            self.render()
+        except (ValueError, TypeError, KeyError, AttributeError):
+            self.local_settings.remove('previous_session_v1')
+
+    def _restore_session_windows(self):
+        from PySide6.QtCore import QByteArray
+        if not self._session_windows:
+            self.arrange_windows()
+            return
+        for name, widget in [('main', self), ('output', self.out), ('reader', self.reader)]:
+            state = self._session_windows.get(name, {})
+            if state.get('geometry'):
+                widget.restoreGeometry(QByteArray.fromBase64(state['geometry'].encode('ascii')))
+            if name != 'main':
+                widget.setVisible(bool(state.get('visible', True)))
+
     def closeEvent(self, event):
         if self.plugin_controller.preparing:
             QMessageBox.information(self, 'Plugins are preparing', 'Please wait for plugin preparation to finish before closing.')
@@ -4873,6 +5041,8 @@ class MainWindow(QMainWindow):
                                     'Please wait until the recording finishes saving before exiting.')
             event.ignore()
             return
+        self._save_session()
+        self._session_timer.stop()
         self.stop_animation_test()
         if self.animation_test_window is not None:
             self.animation_test_window.close()
