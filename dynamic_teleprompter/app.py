@@ -1155,8 +1155,14 @@ class VisualLayerEditor(QDialog):
                        'Text fields keep normal cursor controls. Last pressed direction wins on diagonals.')
         intro.setWordWrap(True)
         layout.addWidget(intro)
-        form = QFormLayout()
-        layout.addLayout(form)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        form = QFormLayout(content)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+        available = self.screen().availableGeometry().height() if self.screen() else 900
+        dialog.resize(650, min(760, max(400, available-80)))
         enabled = QCheckBox('Enable keyboard movement for this character')
         enabled.setChecked(bool(current['enabled']))
         form.addRow(enabled)
@@ -2711,7 +2717,7 @@ class MainWindow(QMainWindow):
             else:
                 self._record_start_pending = True
             return
-        if not model_is_installed() and not self.local_settings.value('voice_model_path', '', type=str):
+        if not self._voice_model_available():
             QMessageBox.information(self, 'Voice tracking needs a model',
                 'Install the offline English speech model in Microphone → Voice Tracking before recording.')
             return
@@ -2837,7 +2843,7 @@ class MainWindow(QMainWindow):
         from processing_ui import ProcessingChoices
         if not self.recorder.error:
             self.recorder.processing_options = ProcessingChoices(self, self.recorder.microphone,
-                                                                 bool(model_is_installed() or self.local_settings.value('voice_model_path', '', type=str))).options()
+                                                                 self._voice_model_available()).options()
         self.record_caption.setText('Saving…')
         self.recorder.finish_async()
         self.record_finish_timer.start()
@@ -3934,7 +3940,7 @@ class MainWindow(QMainWindow):
 
     def start_animation_test(self):
         self.stop_animation_test()
-        if not model_is_installed():
+        if not self._voice_model_available():
             QMessageBox.information(self, 'Speech model required',
                                     'Install the English model to run a voice-controlled reading test.')
             return
@@ -3953,7 +3959,8 @@ class MainWindow(QMainWindow):
         self.test_heard_final = ''
         self._test_rendered_prefix = None
         win.set_output(['', '', ''], {**self._test_settings(), 'instant': True})
-        self.test_voice_worker = VoiceWorker(self.microphones.currentData())
+        self.test_voice_worker = VoiceWorker(self.microphones.currentData(), ' '.join(self.test_groups),
+                                             self.local_settings.value('voice_model_path', '', type=str) or None)
         self.test_voice_worker.recognized.connect(self._on_animation_test_recognized)
         self.test_voice_worker.failed.connect(self._on_animation_test_failed)
         self.test_voice_worker.finished.connect(self._animation_test_worker_finished)
@@ -4114,9 +4121,12 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.voice_status.setText('Could not enumerate microphones: ' + str(exc))
 
-    def update_model_status(self):
+    def _voice_model_available(self):
         custom = self.local_settings.value('voice_model_path', '', type=str)
-        installed = ((Path(custom)/'am'/'final.mdl').is_file() if custom else model_is_installed())
+        return ((Path(custom)/'am'/'final.mdl').is_file() and (Path(custom)/'conf'/'mfcc.conf').is_file()) if custom else model_is_installed()
+
+    def update_model_status(self):
+        installed = self._voice_model_available()
         status = ('Installed — offline English recognition is ready.' if installed
                   else 'Not installed — download required for voice tracking.')
         self.model_status.setText(status)
@@ -4177,7 +4187,7 @@ class MainWindow(QMainWindow):
         if self.test_voice_worker is not None and self.test_voice_worker.isRunning():
             QMessageBox.information(self, 'Animation test running', 'Stop the reading test first.')
             return
-        if self.start_voice_following.isChecked() and not model_is_installed() and not self.local_settings.value('voice_model_path', '', type=str):
+        if self.start_voice_following.isChecked() and not self._voice_model_available():
             QMessageBox.information(self, 'Model needed', 'Install the offline English model before starting voice following.')
             return
         if not self.script.toPlainText().strip():
@@ -4222,7 +4232,7 @@ class MainWindow(QMainWindow):
         if self.voice_worker is not None and self.voice_worker.isRunning():
             self.stop_listening()
             return
-        if not model_is_installed() and not self.local_settings.value('voice_model_path', '', type=str):
+        if not self._voice_model_available():
             QMessageBox.information(self, 'Model needed', 'Download the offline English model first, then start listening.')
             return
         if not preserve_presentation:
