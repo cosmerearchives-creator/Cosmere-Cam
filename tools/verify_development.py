@@ -106,6 +106,62 @@ def main():
         # Real FFmpeg performs both trimming modes on generated tone/silence.
         ffmpeg = resolve_ffmpeg()
         import subprocess
+        # Encode movement frames while the text and slide remain unchanged.
+        import numpy as np
+        import imageio_ffmpeg
+        from recorder import CanvasRecorder
+        original_layers = window.media_layers
+        old_resolution = window.canvas_resolution.currentText()
+        window.canvas_resolution.addItem('320x240')
+        window.canvas_resolution.setCurrentText('320x240')
+        moving = dict(type='live2d', path='moving-marker', visible=True, x=0, y=0,
+                      movement=dict(enabled=True))
+        window.media_layers = [dict(type='text',visible=True), moving]
+        window.render()
+        text_state = (window.out.labels[0].text(), window.out.labels[0]._phase_started)
+        path = temp/'movement.mp4'
+        recorder = CanvasRecorder(path,320,240,30,microphone=False)
+        recorder.start()
+        frame_number = [0]
+        recorder.elapsed = lambda: frame_number[0]/30
+        seen_pose = []
+        def marker(painter, layer, size):
+            seen_pose.append(layer.get('_movement_turn',0))
+            painter.fillRect(round(size[0]*(.5+layer.get('x',0)/100)),
+                             round(size[1]*.75),12,12,QColor('#0000ff'))
+        window._movement_keys = {'d'}
+        clock = time.monotonic()
+        window._movement_last_tick = clock-1/30
+        with patch('app.draw_live2d', side_effect=marker), patch.object(QApplication,'activeWindow',return_value=window.out):
+            for index in range(30):
+                frame_number[0] = index
+                with patch('app.time.monotonic',return_value=clock+index/30):
+                    window._tick_movement()
+                    recorder.push_frame(window.out.render_frame())
+                time.sleep(1/30)
+        recorder.finish_async()
+        deadline = time.monotonic()+20
+        while not recorder.finished and time.monotonic()<deadline:
+            time.sleep(.02)
+        assert recorder.finished and not recorder.error, recorder.error
+        frames = imageio_ffmpeg.read_frames(str(path), pix_fmt='rgb24')
+        metadata = next(frames)
+        width,height = metadata['size']
+        positions = []
+        for payload in frames:
+            pixels = np.frombuffer(payload,dtype=np.uint8).reshape(height,width,3)
+            mask = (pixels[:,:,2]>160)&(pixels[:,:,0]<80)&(pixels[:,:,1]<80)
+            positions.append(float(np.nonzero(mask)[1].mean()))
+        frames.close()
+        assert positions[-1]>positions[0]+15, positions
+        assert max(seen_pose)>.8
+        assert text_state == (window.out.labels[0].text(),window.out.labels[0]._phase_started)
+        window._movement_keys.clear()
+        window.media_layers = original_layers
+        window.canvas_resolution.setCurrentText(old_resolution)
+        window.render()
+        results['movement_export_without_text_updates'] = True
+        results['movement_export_pixels_travelled'] = round(positions[-1]-positions[0],2)
         source = temp/'synthetic.mp4'
         subprocess.run([ffmpeg, '-y','-v','error','-f','lavfi','-i','color=c=blue:s=160x90:r=30:d=5',
             '-f','lavfi','-i',r"aevalsrc=if(between(t\,1\,2)+between(t\,3\,4)\,0.2*sin(2*PI*440*t)\,0):s=16000:d=5",
