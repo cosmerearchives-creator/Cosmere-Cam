@@ -3842,7 +3842,7 @@ class MainWindow(QMainWindow):
         return self.animation_test_window
 
     def _test_settings(self):
-        values = self.settings()
+        values = self._runtime_settings()
         values['mode'] = 'Script'
         values['behavior'] = 'Replace'
         values['motion'] = self.motion_from_controls()
@@ -4367,6 +4367,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(done)
         dialog.exec()
 
+    def _runtime_settings(self):
+        """Rendering uses live layer objects, including transient movement pose.
+
+        settings() remains the detached, serializable project/defaults snapshot.
+        Do not copy those stripped snapshots into the running compositor.
+        """
+        values = self.settings()
+        values['media_layers'] = self.media_layers
+        return values
+
     def settings(self):
         return dict(first_slide=self.start_first_slide.isChecked(),
                     voice_following=self.start_voice_following.isChecked(),
@@ -4443,7 +4453,7 @@ class MainWindow(QMainWindow):
     def clear_output(self):
         self.timer.stop()
         self._last_visible_state = None
-        self.out.set_output(['', '', ''], {**self.settings(), 'instant': True})
+        self.out.set_output(['', '', ''], {**self._runtime_settings(), 'instant': True})
 
     def render(self, *_):
         if not hasattr(self, 'groups') or not hasattr(self, 'out'):
@@ -4488,7 +4498,7 @@ class MainWindow(QMainWindow):
         visible_state = (tuple(texts), behavior, self.delay.value())
         should_restart_timer = visible_state != getattr(self, '_last_visible_state', None)
         self._last_visible_state = visible_state
-        render_settings = self.settings()
+        render_settings = self._runtime_settings()
         render_settings['visual'] = self.visual_for_slide(self.index)
         render_settings['motion'] = self.motion_for_slide(self.index)
         render_settings['incremental'] = bool(speech_gated)
