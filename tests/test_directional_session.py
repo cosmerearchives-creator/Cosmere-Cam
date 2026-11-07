@@ -109,6 +109,19 @@ class SuiteInputSession(unittest.TestCase):
         self.assertFalse(self.window.awaiting_first)
         self.assertIsNone(self.window.recorder)
         self.assertIsNone(self.window.voice_worker)
+    def test_composite_text_editors_keep_cursor_without_selection_changes(self):
+        spin=QSpinBox();spin.setValue(42)
+        combo=QComboBox();combo.setEditable(True);combo.addItems(['hello','world'])
+        for widget in (spin,combo):
+            edit=widget.lineEdit();edit.setCursorPosition(len(edit.text()))
+            with patch.object(QApplication,'activeWindow',return_value=self.window),patch.object(QApplication,'focusWidget',return_value=widget):
+                self.assertTrue(self.window._typing_focus())
+                self.window.eventFilter(widget,self.event(Qt.Key.Key_Left))
+                self.assertEqual(edit.cursorPosition(),len(edit.text())-1)
+                self.window.eventFilter(widget,self.event(Qt.Key.Key_Up))
+                self.assertFalse(self.window._movement_keys)
+        self.assertEqual(spin.value(),42)
+        self.assertEqual(combo.currentIndex(),0)
     def test_new_window_restores_checkpoint(self):
         self.window.script.setPlainText('A session restored on startup')
         self.window.prepare_groups()

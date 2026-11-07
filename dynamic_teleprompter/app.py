@@ -3737,12 +3737,20 @@ class MainWindow(QMainWindow):
             self.menuBar().hide()
 
     @staticmethod
-    def _typing_focus():
+    def _focused_text_editor():
         focus = QApplication.focusWidget()
         if isinstance(focus, (QTextEdit, QPlainTextEdit, QLineEdit)):
-            return not focus.isReadOnly()
-        # Editable combo/spin editors expose their line edit as the focus widget.
-        return False
+            return focus if not focus.isReadOnly() else None
+        # Qt reports the composite control as focus even when its editor has focus.
+        if isinstance(focus, (QSpinBox, QDoubleSpinBox)):
+            return focus.lineEdit() if not focus.isReadOnly() else None
+        if isinstance(focus, QComboBox) and focus.isEditable():
+            return focus.lineEdit() if not focus.lineEdit().isReadOnly() else None
+        return None
+
+    @staticmethod
+    def _typing_focus():
+        return MainWindow._focused_text_editor() is not None
 
     def _movement_layer(self):
         # Respect the selected layer in the editor, then the active saved character.
@@ -3792,6 +3800,13 @@ class MainWindow(QMainWindow):
                     self._movement_keys.discard(key)
                     if key in self._movement_order:
                         self._movement_order.remove(key)
+                editor = self._focused_text_editor()
+                if event.key() in arrows and editor is not None and editor is not QApplication.focusWidget():
+                    self._movement_keys.clear()
+                    self._movement_order.clear()
+                    # Keep cursor editing, without spin increments or combo selection.
+                    editor.event(event)
+                    return True
                 # Arrow navigation belongs exclusively to the model outside text inputs.
                 if not self._typing_focus() and (event.key() in arrows or not event.modifiers()):
                     if kind == QEvent.Type.ShortcutOverride:

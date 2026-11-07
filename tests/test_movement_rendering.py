@@ -51,7 +51,7 @@ class MovementRenderingTests(unittest.TestCase):
                 now = time.monotonic()
                 window._movement_last_tick = now
                 frames = []
-                with patch.object(QApplication, 'activeWindow', return_value=window.out), \
+                with patch.object(QApplication, 'activeWindow', return_value=window.out), patch.object(QApplication, 'focusWidget', return_value=None), \
                      patch.object(window, 'render', wraps=window.render) as text_render:
                     for step in range(1, 21):
                         with patch('app.time.monotonic', return_value=now + step / 30):
@@ -70,7 +70,7 @@ class MovementRenderingTests(unittest.TestCase):
                 # Head returns smoothly while translation settles without text events.
                 turn = layer['_movement_turn']
                 window._movement_keys.clear()
-                with patch.object(QApplication, 'activeWindow', return_value=window.out):
+                with patch.object(QApplication, 'activeWindow', return_value=window.out), patch.object(QApplication, 'focusWidget', return_value=None):
                     for step in range(21, 111):
                         with patch('app.time.monotonic', return_value=now + step / 30):
                             window._tick_movement()

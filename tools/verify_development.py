@@ -132,7 +132,7 @@ def main():
         window._movement_keys = {'d'}
         clock = time.monotonic()
         window._movement_last_tick = clock-1/30
-        with patch('app.draw_live2d', side_effect=marker), patch.object(QApplication,'activeWindow',return_value=window.out):
+        with patch('app.draw_live2d', side_effect=marker), patch.object(QApplication,'activeWindow',return_value=window.out), patch.object(QApplication,'focusWidget',return_value=None):
             for index in range(30):
                 frame_number[0] = index
                 with patch('app.time.monotonic',return_value=clock+index/30):
