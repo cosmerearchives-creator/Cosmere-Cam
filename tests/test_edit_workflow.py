@@ -155,7 +155,7 @@ class RealEditableExport(unittest.TestCase):
             self.assertGreater(len(baseline),len(edited))
             self.assertTrue(np.all(baseline[2][100,100]<[10,10,260])) # no red baked-in text/frame
             self.assertGreater(int(baseline[7][10,10,1]),200) # foreground alpha retained
-            self.assertTrue(90<int(baseline[7][10,50,0])<165)
+            self.assertTrue(90<int(baseline[7][10,50,0])<165,baseline[7][10,50].tolist())
             self.assertTrue(90<int(baseline[7][10,50,2])<165)
             white=lambda image:int(((image[:,:,0]>170)&(image[:,:,1]>170)&(image[:,:,2]>170)).sum())
             self.assertLess(white(baseline[2]),20)

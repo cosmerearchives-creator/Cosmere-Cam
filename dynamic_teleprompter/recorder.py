@@ -208,7 +208,10 @@ class CanvasRecorder:
                 if isinstance(pixels,QImage):
                     key=pixels.cacheKey()
                     if key!=last_key:
-                        last_image=pixels.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+                        # QuickTime alpha tracks use straight alpha. Keep the mode explicit
+                        # instead of relying on FFmpeg-version-specific auto conversions.
+                        pixel_format=QImage.Format.Format_ARGB32 if self.alpha else QImage.Format.Format_ARGB32_Premultiplied
+                        last_image=pixels.convertToFormat(pixel_format)
                         last_pixels=last_image.constBits();last_key=key
                     pixels=last_pixels
                 self._video.stdin.write(pixels)
@@ -407,7 +410,7 @@ class CanvasRecorder:
                     os.replace(stage,bundle)
                 data=self.processing_result['alignment']
                 data['source']=dict(scene=str(bundle/'scene.mp4'),foreground=str(bundle/'foreground.mov'),
-                    original=str(bundle/'capture.mp4'),foreground_premultiplied=True,fps=self.fps,width=self.width,height=self.height,audio=self.microphone)
+                    original=str(bundle/'capture.mp4'),foreground_premultiplied=False,fps=self.fps,width=self.width,height=self.height,audio=self.microphone)
                 data['render_project']=self.render_project
                 data['output_stem']=str(self.path.with_suffix(''))
                 atomic_json(self.path.with_suffix('.alignment.json'),data)
