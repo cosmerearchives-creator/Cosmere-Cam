@@ -31,7 +31,7 @@ def smoke(root, env):
     env = dict(env, COSMERE_SMOKE_REPORT=str(report))
     run([root / 'CosmereCamLauncher.exe', '--root', root, '--smoke-test'], env)
     data = read_json(report)
-    assert data['version'] == VERSION and data['qt'] and data['ffmpeg'] and data['discard'] and data['save'], data
+    assert data['version'] == VERSION and data['qt'] and data['ffmpeg'] and data['discard'] and data['save'] and data.get('approved_export'), data
     assert not (root / 'transaction.json').exists()
     return data
 

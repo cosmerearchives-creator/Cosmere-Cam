@@ -240,6 +240,38 @@ def main():
         results['canvas_call_mean_ms'] = round(sum(samples)/len(samples),2)
         results['video_source_resolution'] = [1280,720]
         results['live2d_fixture_is_synthetic'] = True
+        # Exercise the extra editable tracks at the real portrait canvas size.
+        window.media_layers=[dict(type='live2d',path='synthetic-model',visible=True,scale=.4),
+                             dict(type='text',visible=True)]+window.media_layers[2:]
+        window.render()
+        window.out.capture_editable=True
+        editable=CanvasRecorder(temp/'editable-benchmark.mp4',1080,1920,30,microphone=False,editable=True)
+        editable.start();window.out.capture_owner=editable;start=time.monotonic();captures=0;capture_costs=[]
+        while time.monotonic()-start<1.5:
+            if editable.frames_due()>0:
+                tick=time.perf_counter()
+                window.out.render_frame(force=True)
+                rendered_at=time.perf_counter()
+                editable.push_frame(window.out._snapshot,window.out.editable_background,window.out.editable_foreground)
+                capture_costs.append(((rendered_at-tick)*1000,(time.perf_counter()-rendered_at)*1000))
+                captures+=1
+            qt.processEvents();time.sleep(.002)
+        elapsed=time.monotonic()-start
+        editable.finish_async()
+        deadline=time.monotonic()+30
+        while not editable.finished and time.monotonic()<deadline:
+            qt.processEvents();time.sleep(.01)
+        assert editable.finished and not editable.error, editable.error
+        print('Editable source capture profile:',captures/elapsed,'FPS; render/push ms',np.mean(capture_costs,axis=0),flush=True)
+        if captures/elapsed<20:
+            live.close_render_workers();app.VIDEO_FRAMES.shutdown()
+        assert captures/elapsed>=20, captures/elapsed
+        results['editable_portrait_capture_fps']=round(captures/elapsed,2)
+        results['editable_tracks_frame_counts']=[editable.frame_count]+[track.frame_count for track in editable.companions]
+        assert len(set(results['editable_tracks_frame_counts']))==1
+        window.out.capture_editable=False
+        window.out.capture_owner=None
+
         live.close_render_workers()
         assert app.VIDEO_FRAMES.shutdown(), 'Video decoder failed to release its input file'
         window.voice_worker = None

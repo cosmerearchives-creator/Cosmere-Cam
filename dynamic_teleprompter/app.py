@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QFontComboBox, QFormLayout, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSpinBox, QSplitter, QTabWidget, QTextEdit, QVBoxLayout,
-    QWidget, QLineEdit, QPlainTextEdit, QSlider, QGraphicsOpacityEffect, QProgressBar, QFrame, QMenu, QListWidget, QListWidgetItem, QDialog, QInputDialog, QStyle
+    QWidget, QLineEdit, QPlainTextEdit, QSizePolicy, QSlider, QGraphicsOpacityEffect, QProgressBar, QFrame, QMenu, QListWidget, QListWidgetItem, QDialog, QInputDialog, QStyle
 )
 
 import numpy as np
@@ -1608,6 +1608,8 @@ class OutputWindow(QWidget):
 
     def render_frame(self, force=False):
         """Generate native-resolution pixels, regardless of preview window size."""
+        if not force and getattr(self,'capture_owner',None) is not None:
+            return self._snapshot
         bucket = int(time.monotonic() * max(1, self.frame_rate))
         if not force and not self._dirty and bucket == getattr(self, '_frame_bucket', None):
             return self._snapshot
@@ -1627,6 +1629,8 @@ class OutputWindow(QWidget):
                 self.scene.paint_background(painter)
                 stage_times['background_media_ms'] = (time.perf_counter() - started) * 1000
                 text_started = time.perf_counter()
+                if getattr(self, 'capture_editable', False):
+                    self.editable_background = frame.copy()
                 layer = next((e for e in self.scene._media_layers if e.get('type') == 'text'), {})
                 if layer.get('visible', True):
                     labels = [label for label in self.labels if not label.isHidden()]
@@ -1659,7 +1663,24 @@ class OutputWindow(QWidget):
             foreground_started = time.perf_counter()
             overlay = QPainter(frame)
             try:
-                draw_media_layers(overlay, self.scene._media_layers, self.canvas_size, foreground=True)
+                if getattr(self, 'capture_editable', False):
+                    text_index=next((i for i,e in enumerate(self.scene._media_layers) if e.get('type')=='text'),len(self.scene._media_layers))
+                    has_foreground=any(e.get('visible',True) and e.get('type') in ('image','video','live2d') for e in self.scene._media_layers[:text_index])
+                    if has_foreground:
+                        foreground=QImage(width,height,QImage.Format.Format_ARGB32_Premultiplied)
+                        foreground.fill(Qt.GlobalColor.transparent)
+                        fp=QPainter(foreground)
+                        try:draw_media_layers(fp,self.scene._media_layers,self.canvas_size,foreground=True)
+                        finally:fp.end()
+                        self.editable_foreground=foreground
+                        overlay.drawImage(0,0,foreground)
+                    else:
+                        if getattr(self,'_empty_foreground',QImage()).size()!=frame.size():
+                            self._empty_foreground=QImage(width,height,QImage.Format.Format_ARGB32_Premultiplied)
+                            self._empty_foreground.fill(Qt.GlobalColor.transparent)
+                        self.editable_foreground=self._empty_foreground
+                else:
+                    draw_media_layers(overlay, self.scene._media_layers, self.canvas_size, foreground=True)
             finally:
                 overlay.end()
             stage_times['foreground_media_ms'] = (time.perf_counter() - foreground_started) * 1000
@@ -2711,7 +2732,20 @@ class MainWindow(QMainWindow):
         if self.test_voice_worker is not None and self.test_voice_worker.isRunning():
             QMessageBox.information(self, 'Reading test running', 'Stop the reading test before recording.')
             return
+        self.tracking_mode.setCurrentText('Automatic')
         if self.voice_worker is not None and self.voice_worker.isRunning():
+            if getattr(self.voice_worker,'running',True) is False:
+                self._record_start_pending=True
+                self._restart_record_voice=True
+                self.record_toggle.setEnabled(False)
+                self.record_status.setText('Waiting for previous voice session to stop…')
+                return
+            self.voice_enabled = True
+            self.voice_muted = False
+            self.voice_worker.set_muted(False)
+            self.mute_button.setEnabled(True)
+            self.mute_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume))
+            self.set_listen_button_text('Stop Voice Following')
             if getattr(self.voice_worker, 'ready_for_recording', False):
                 self._begin_recording()
             else:
@@ -2751,12 +2785,14 @@ class MainWindow(QMainWindow):
             return
         try:
             if self.start_first_slide.isChecked():
-                self.prepare_groups()
+                self.prepare_groups(preserve_voice=True)
                 self.voice_cursor = 0
                 self.heard_final = ''
                 if self.voice_worker is not None:
                     self.voice_worker.reset_recognition()
                 self.next()
+            self.out.capture_editable = self.keep_editable.isChecked()
+            self.out._dirty = True
             self.render()
             directory = Path(self.record_dir)
             directory.mkdir(parents=True, exist_ok=True)
@@ -2770,16 +2806,21 @@ class MainWindow(QMainWindow):
                                             audio_gate_db=self.audio_gate_threshold.value(),
                                             audio_gate_enabled=any(e['type'] == 'gate' and e['enabled'] for e in self._audio_chain_snapshot()),
                                             audio_chain=self._audio_chain_snapshot(),
-                                            audio_clip_drive=self.audio_clip_drive.value())
+                                            audio_clip_drive=self.audio_clip_drive.value(),
+                                            editable=self.keep_editable.isChecked())
             if self.audio_monitor is not None:
                 self._stop_monitor(keep_checkbox=True)
             lip_microphone.stop()
             self.recorder.audio_level_listener = lip_microphone.feed
             self.recorder.script = self.script.toPlainText()
+            self.recorder.render_project = self._project_payload()
+            self.recorder.render_project['groups'] = list(self.groups)
             self.recorder.model_path = self.local_settings.value('voice_model_path', '', type=str) or str(MODEL_DIR)
             self.recorder.start()
+            self.out.capture_owner=self.recorder
             if self.monitor_toggle.isChecked() and self.record_microphone.isChecked():
                 self._start_monitor(external=True)
+            self.keep_editable.setEnabled(False)
             self.record_microphone.setEnabled(False)
             self.canvas_resolution.setEnabled(False)
             self.canvas_fps.setEnabled(False)
@@ -2796,8 +2837,11 @@ class MainWindow(QMainWindow):
             if self.recorder is not None:
                 self.recorder.abort()
             self.recorder = None
+            self.out.capture_editable = False
+            self.out.capture_owner=None
             self.record_status.setText('Recording failed to start: ' + str(error))
             QMessageBox.warning(self, 'Recording failed to start', str(error))
+            self.keep_editable.setEnabled(True)
             self.record_microphone.setEnabled(True)
             self.canvas_resolution.setEnabled(True)
             self.canvas_fps.setEnabled(True)
@@ -2811,8 +2855,11 @@ class MainWindow(QMainWindow):
             if due <= 0:
                 return
             capture_start = time.perf_counter()
-            frame = self.out.render_frame()
-            recorder.push_frame(frame)
+            frame = self.out.render_frame(force=True)
+            if recorder.editable:
+                recorder.push_frame(frame,self.out.editable_background,self.out.editable_foreground)
+            else:
+                recorder.push_frame(frame)
             recorder.note_capture((time.perf_counter() - capture_start) * 1000)
             recorder.render_stages = dict(getattr(self.out, 'render_stages', {}))
             if recorder.error:
@@ -2881,10 +2928,13 @@ class MainWindow(QMainWindow):
             return
         self.record_finish_timer.stop()
         self.recorder = None
+        self.out.capture_editable = False
+        self.out.capture_owner=None
         self.record_discard.setEnabled(False)
         self.audio_chain.setEnabled(True)
         self.record_toggle.setEnabled(True)
         self._set_recording_button(False)
+        self.keep_editable.setEnabled(True)
         self.record_microphone.setEnabled(True)
         if self.monitor_toggle.isChecked():
             self._start_monitor(external=False)
@@ -2895,6 +2945,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Recording failed', recorder.error)
         elif recorder.cancelled:
             self.record_status.setText('Take discarded. Ready to record again.')
+        elif getattr(recorder, 'awaiting_review', False):
+            self.record_status.setText('Analysis ready — approve word timings, then export. Source take retained.')
         else:
             self.record_status.setText('Saved: %s (%d frames, %d late)' %
                                        (recorder.path, recorder.frame_count, recorder.late_frames))
@@ -3065,7 +3117,9 @@ class MainWindow(QMainWindow):
             QStyle.StandardPixmap.SP_TrashIcon, self._discard_recording)
         self.record_discard.setEnabled(False)
         self.record_discard.setToolTip('Discard this take without saving (confirmation required)')
-        self.quick_first_slide = QCheckBox('First slide')
+        self.quick_first_slide = QCheckBox('Show first slide')
+        self.quick_first_slide.setMinimumWidth(155)
+        self.quick_first_slide.setStyleSheet('QCheckBox { spacing: 8px; padding: 4px 0; }')
         self.quick_first_slide.setToolTip('Show the first slide when starting a recording or presentation')
         bottom.addWidget(self.quick_first_slide, 0, Qt.AlignmentFlag.AlignTop)
         bottom.addStretch(1)
@@ -3073,6 +3127,7 @@ class MainWindow(QMainWindow):
         self.current.setWordWrap(True)
         self.current.setMinimumSize(150, 55)
         self.current.setMaximumWidth(320)
+        self.current.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.current.setStyleSheet('padding: 10px; border: 0; border-radius: 12px; background: #29262F; color: #F7F5F0;')
         bottom.addWidget(self.current, 2, Qt.AlignmentFlag.AlignTop)
         page.addWidget(toolbar)
@@ -3282,6 +3337,10 @@ class MainWindow(QMainWindow):
         self.record_status = QLabel('Ready — FFmpeg required. Save as MP4 (H.264 + optional AAC audio).')
         self.record_status.setWordWrap(True)
         record_form.addRow('Status:', self.record_status)
+        self.keep_editable = QCheckBox('Prepare editable source for corrected text and advanced exports')
+        self.keep_editable.setChecked(True)
+        self.keep_editable.setToolTip('Uses additional disk space and encoding work. Required to replace text after recording.')
+        record_form.addRow(self.keep_editable)
         review = QPushButton('Review saved word timings…')
         review.clicked.connect(self.open_alignment_review)
         record_form.addRow('Word alignment:', review)
@@ -4280,6 +4339,7 @@ class MainWindow(QMainWindow):
         self.voice_worker.start()
 
     def stop_listening(self):
+        self._restart_record_voice=False
         self._record_start_pending = False
         self.voice_enabled = False
         self.voice_muted = False
@@ -4293,6 +4353,11 @@ class MainWindow(QMainWindow):
         self.set_listen_button_text('Start Voice Following')
 
     def on_voice_finished(self):
+        sender=self.sender()
+        if sender is not None and sender is not self.voice_worker:
+            return
+        restart=getattr(self,'_restart_record_voice',False)
+        self._restart_record_voice=False
         self._record_start_pending = False
         if self.recorder is None:
             self.record_toggle.setEnabled(True)
@@ -4303,6 +4368,9 @@ class MainWindow(QMainWindow):
         self.last_input_level = 0.0
         self.update_mic_indicator()
         self.set_listen_button_text('Start Voice Following')
+        if restart and self.recorder is None:
+            self.voice_worker=None
+            QTimer.singleShot(0,self._toggle_recording)
 
     def on_recognized(self, heard, final):
         if not self.voice_enabled or self.voice_muted:
@@ -4473,7 +4541,7 @@ class MainWindow(QMainWindow):
         return values
 
     def settings(self):
-        return dict(first_slide=self.start_first_slide.isChecked(),
+        return dict(keep_editable=self.keep_editable.isChecked(), first_slide=self.start_first_slide.isChecked(),
                     voice_following=self.start_voice_following.isChecked(),
                     mode=self.mode.currentText(), grouping=self.grouping.currentText(),
                     group_limit=self.group_limit.value(), chars=self.chars.value(),
@@ -4494,8 +4562,8 @@ class MainWindow(QMainWindow):
                     animation=self.animation.currentText(), duration=self.duration.value(),
                     behavior=self.behavior.currentText(), delay=self.delay.value())
 
-    def prepare_groups(self, *_):
-        if getattr(self, 'voice_enabled', False):
+    def prepare_groups(self, *_, preserve_voice=False):
+        if not preserve_voice and getattr(self, 'voice_enabled', False):
             self.stop_listening()
         self.voice_cursor = 0
         self._voice_slide_ready_at = 0.0
@@ -4824,6 +4892,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Project open error', str(exc))
 
     def apply_settings_values(self, values):
+        self.keep_editable.setChecked(bool(values.get('keep_editable', True)))
         self.start_first_slide.setChecked(bool(values.get('first_slide', True)))
         self.start_voice_following.setChecked(bool(values.get('voice_following', True)))
         # Signal blocking prevents reconstructing pages with half-loaded settings.
@@ -5005,6 +5074,11 @@ class MainWindow(QMainWindow):
                 widget.setVisible(bool(state.get('visible', True)))
 
     def closeEvent(self, event):
+        from update_ui import export_in_progress
+        if export_in_progress(self):
+            QMessageBox.information(self,'Export in progress','Finish or cancel the export/preview before closing.')
+            event.ignore()
+            return
         if self.plugin_controller.preparing:
             QMessageBox.information(self, 'Plugins are preparing', 'Please wait for plugin preparation to finish before closing.')
             event.ignore()

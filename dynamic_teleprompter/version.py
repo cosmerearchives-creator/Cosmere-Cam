@@ -1,4 +1,4 @@
 """Single release version; changing this on main triggers a tested release."""
 APP_NAME = 'Cosmere Video Recording Suite'
-VERSION = '0.5.0-alpha23'
-RELEASE_NOTES = 'Arrow controls now work across Suite windows while editable text keeps cursor navigation.\nMovement supports library models per direction, a resting default or last-used model, and optional head turning.\nPrevious script, layers, settings, slide and window layout resume on launch; recording and voice following stay stopped.\nVoice following adds script vocabulary hints, contraction matching, conservative name recovery and a recognition model folder choice.'
+VERSION = '0.5.0-alpha24'
+RELEASE_NOTES = 'Start Recording reliably activates and unmutes voice following, including first-slide startup.\nPlayback controls show the full first-slide label.\nNew editable recordings wait for timing approval before corrected text export. Save review confirms progress; Approve & Export creates the baseline and advanced-edited versions.\nAssisted/automatic script-based retake cuts include join preview, preserved source, cut maps and updated text timings. Cough/filler detection and synchronized comparison video remain future work.'
