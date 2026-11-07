@@ -120,7 +120,7 @@ class CanvasRecorder:
             command = command[:command.index('-c:v')] + ['-c:v','qtrle','-threads','1','-pix_fmt','argb',str(self._silent)]
         self._video = subprocess.Popen(command, stdin=subprocess.PIPE,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                                       creationflags=(getattr(subprocess, 'CREATE_NO_WINDOW', 0) | getattr(subprocess,'BELOW_NORMAL_PRIORITY_CLASS',0)))
         try:
             if self.microphone:
                 import sounddevice as sd
