@@ -4958,8 +4958,10 @@ class MainWindow(QMainWindow):
             self.animation_slides = {int(k): dict(v) for k,v in project.get('animation_slides', {}).items()}
             self.prepare_groups()
             self.index = max(0, min(len(self.groups), int(data.get('index', 0))))
+            self.history = self.groups[:self.index]
             self.awaiting_first = bool(data.get('awaiting_first', True))
             self.voice_cursor = max(0, min(len(normalized_words(' '.join(self.groups))), int(data.get('voice_cursor', 0))))
+            self.reader.set_progress(self.voice_cursor)
             self.main_tabs.setCurrentIndex(max(0, min(self.main_tabs.count()-1, int(data.get('tab', 0)))))
             self.project_path = Path(data['project_path']) if data.get('project_path') else None
             self.project_label.setText(self.project_path.name if self.project_path else 'Restored session')
