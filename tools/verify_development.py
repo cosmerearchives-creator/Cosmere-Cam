@@ -247,7 +247,7 @@ def main():
         window.out.capture_editable=True
         editable=CanvasRecorder(temp/'editable-benchmark.mp4',1080,1920,30,microphone=False,editable=True)
         editable.start();window.out.capture_owner=editable;start=time.monotonic();captures=0;capture_costs=[]
-        while time.monotonic()-start<1.5:
+        while time.monotonic()-start<3.0:
             if editable.frames_due()>0:
                 tick=time.perf_counter()
                 window.out.render_frame(force=True)

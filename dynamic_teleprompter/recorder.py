@@ -40,9 +40,10 @@ def resolve_ffmpeg(configured=''):
 
 
 class CanvasRecorder:
-    def __init__(self, filename, width, height, fps, microphone=True, ffmpeg_path="", audio_gain=100, audio_gate_db=-60, audio_gate_enabled=False, audio_chain=None, audio_clip_drive=150, editable=False, alpha=False):
+    def __init__(self, filename, width, height, fps, microphone=True, ffmpeg_path="", audio_gain=100, audio_gate_db=-60, audio_gate_enabled=False, audio_chain=None, audio_clip_drive=150, editable=False, alpha=False, lossless_rgb=False):
         self.editable = editable
         self.alpha = alpha
+        self.lossless_rgb=lossless_rgb
         self.companions = []
         self.editable_failed=False
         self.render_project = {}
@@ -111,10 +112,12 @@ class CanvasRecorder:
                    '-f', 'rawvideo', '-pixel_format', 'bgra', '-video_size',
                    f'{self.width}x{self.height}', '-framerate', str(self.fps),
                    '-i', 'pipe:0', '-an', '-c:v', 'libx264', '-preset', 'ultrafast',
-                   '-threads','2','-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(self._silent)]
+                   '-threads','1','-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(self._silent)]
+        if self.lossless_rgb:
+            command=command[:command.index('-c:v')]+['-c:v','libx264rgb','-preset','ultrafast','-crf','0','-threads','1','-pix_fmt','bgr0',str(self._silent)]
         if self.alpha:
             self._silent = Path(self._temp.name) / 'foreground.mov'
-            command = command[:command.index('-c:v')] + ['-c:v','qtrle','-threads','2','-pix_fmt','argb',str(self._silent)]
+            command = command[:command.index('-c:v')] + ['-c:v','qtrle','-threads','1','-pix_fmt','argb',str(self._silent)]
         self._video = subprocess.Popen(command, stdin=subprocess.PIPE,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -146,7 +149,7 @@ class CanvasRecorder:
         if self.editable:
             for name,alpha in [('background.mp4',False),('foreground.mov',True)]:
                 companion=CanvasRecorder(Path(self._temp.name)/name,self.width,self.height,self.fps,
-                                         microphone=False,ffmpeg_path=self._ffmpeg,alpha=alpha)
+                                         microphone=False,ffmpeg_path=self._ffmpeg,alpha=alpha,lossless_rgb=not alpha)
                 companion.start()
                 companion.frames_due=lambda c=companion:max(0,self.frame_count-c.frame_count)
                 self.companions.append(companion)
