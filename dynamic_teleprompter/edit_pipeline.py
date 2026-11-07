@@ -201,3 +201,24 @@ def export_videos(data,concat,output_stem,ffmpeg,work,progress,cancel):
         atomic_json(edited.with_suffix('.edits.json'),dict(schema=1,baseline=str(baseline),cuts=cuts,applied_cuts=applied,kept_segments=kept))
         result['edited']=str(edited)
     return result
+
+
+def preview_join(data,cut,ffmpeg,directory,cancel):
+    """Preview the same frame-aligned join with captured foreground media intact."""
+    root=Path(directory);fps=float(data['source']['fps'])
+    a=round(float(cut['start'])*fps)/fps;b=round(float(cut['end'])*fps)/fps
+    segments=[(max(0.,a-1.5),a),(b,min(float(data['duration']),b+1.5))]
+    segments=[(start,end) for start,end in segments if end-start>.03]
+    if not segments:raise ValueError('No surrounding footage available to preview.')
+    scene=root/'preview-scene.mp4'
+    cut_media(data['source']['scene'],scene,segments,ffmpeg,root,audio=data['source'].get('audio',True),cancel=cancel)
+    foreground=data['source'].get('foreground')
+    if not foreground:return scene
+    fore=root/'preview-foreground.mov'
+    cut_media(foreground,fore,segments,ffmpeg,root,audio=False,alpha=True,cancel=cancel)
+    result=root/'join.mp4'
+    alpha='premultiplied' if data['source'].get('foreground_premultiplied') else 'straight'
+    run_media([ffmpeg,'-y','-v','error','-i',str(scene),'-i',str(fore),'-filter_complex',
+        f'[0:v][1:v]overlay=shortest=1:alpha={alpha}[v]','-map','[v]','-map','0:a?',
+        '-c:v','libx264','-preset','veryfast','-crf','18','-pix_fmt','yuv420p','-c:a','copy',str(result)],cancel)
+    return result

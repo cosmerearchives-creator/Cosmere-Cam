@@ -255,15 +255,9 @@ class PreviewWorker(QThread):
         self.cancel=threading.Event()
     def run(self):
         try:
-            from edit_pipeline import cut_media
+            from edit_pipeline import preview_join
             from recorder import resolve_ffmpeg
-            a,b=self.cut['start'],self.cut['end']
-            segments=[(max(0,a-1.5),a),(b,min(self.data['duration'],b+1.5))]
-            segments=[(x,y) for x,y in segments if y-x>.03]
-            if not segments:raise ValueError('No surrounding footage available to preview.')
-            target=Path(self.directory)/'join.mp4'
-            cut_media(self.data['source']['scene'],target,segments,resolve_ffmpeg(),self.directory,
-                      audio=self.data['source'].get('audio',True),cancel=self.cancel)
+            target=preview_join(self.data,self.cut,resolve_ffmpeg(),self.directory,self.cancel)
             self.done.emit(str(target))
         except Exception as error:self.failed.emit(str(error))
 

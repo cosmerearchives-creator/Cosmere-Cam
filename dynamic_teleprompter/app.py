@@ -805,7 +805,11 @@ class LayerCanvasPreview(QWidget):
         x, y, w, h = self.content_rect()
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         from PySide6.QtCore import QRectF
-        painter.drawImage(QRectF(x,y,w,h), snapshot)
+        key=(snapshot.cacheKey(),round(w),round(h))
+        if key!=getattr(self,'_scaled_key',None):
+            self._scaled=snapshot.scaled(max(1,round(w)),max(1,round(h)),Qt.AspectRatioMode.IgnoreAspectRatio,Qt.TransformationMode.SmoothTransformation)
+            self._scaled_key=key
+        painter.drawImage(round(x),round(y),self._scaled)
         painter.setPen(QPen(QColor('#83b8d7'), 1))
         painter.drawRect(QRectF(x,y,w,h))
 
@@ -1697,7 +1701,10 @@ class OutputWindow(QWidget):
     def refresh_preview(self):
         if self.isVisible() and not self.isMinimized():
             self.render_frame()
-            self.update()
+            key=self._snapshot.cacheKey()
+            if key!=getattr(self,'_preview_requested_key',None):
+                self._preview_requested_key=key
+                self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1707,9 +1714,11 @@ class OutputWindow(QWidget):
         target_size = self._snapshot.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
         x = (self.width() - target_size.width()) // 2
         y = (self.height() - target_size.height()) // 2
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        painter.drawImage(x, y, self._snapshot.scaled(target_size, Qt.AspectRatioMode.IgnoreAspectRatio,
-                                                    Qt.TransformationMode.SmoothTransformation))
+        key=(self._snapshot.cacheKey(),target_size.width(),target_size.height())
+        if key!=getattr(self,'_preview_scaled_key',None):
+            self._preview_scaled=self._snapshot.scaled(target_size,Qt.AspectRatioMode.IgnoreAspectRatio,Qt.TransformationMode.SmoothTransformation)
+            self._preview_scaled_key=key
+        painter.drawImage(x,y,self._preview_scaled)
 
     def export_png(self, filename):
         return self.render_frame(force=True).save(str(filename), 'PNG')

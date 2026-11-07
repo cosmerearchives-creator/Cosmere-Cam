@@ -163,6 +163,13 @@ class RealEditableExport(unittest.TestCase):
             self.assertGreater(white(baseline[14]),white(baseline[8]))
             map_path=Path(data['exports']['edited']).with_suffix('.edits.json')
             self.assertTrue(map_path.is_file())
+            from edit_pipeline import preview_join
+            preview=root/'preview';preview.mkdir()
+            join=preview_join(data,data['cuts'][0],resolve_ffmpeg(),preview,threading.Event())
+            joined=decode(join)
+            self.assertGreater(int(joined[2][10,10,1]),200)
+            self.assertLess(len(joined),len(baseline))
+
             self.assertTrue(Path(data['source']['original']).is_file())
             dialog.close();qt.processEvents()
     def test_auxiliary_failure_keeps_playable_capture(self):
