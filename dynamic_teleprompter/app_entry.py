@@ -10,7 +10,7 @@ if '--smoke-test' in sys.argv:
     os.environ['COSMERE_TEST_MODE'] = '1'
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer,QUrl
 from PySide6.QtWidgets import QApplication
 from app import MainWindow
 from version import VERSION
@@ -98,6 +98,39 @@ def run():
                 import subprocess
                 subprocess.run([resolve_ffmpeg(), '-v', 'error', '-i', str(saved), '-f', 'null', '-'],
                                check=True, capture_output=True, timeout=10)
+                # Exercise the packaged Qt caption renderer and FFmpeg export, not just source imports.
+                from edit_pipeline import run_media
+                from export_ui import ExportDialog
+                from recording_processing import align_script
+                from PySide6.QtMultimedia import QMediaPlayer
+                from PySide6.QtMultimediaWidgets import QVideoWidget
+                media_probe=QMediaPlayer()
+                clean=Path(directory)/'clean.mp4'
+                run_media([resolve_ffmpeg(),'-y','-v','error','-stream_loop','-1','-i',str(saved),
+                           '-t','0.4','-vf','scale=64:64','-c:v','libx264',str(clean)])
+                video_probe=QVideoWidget();media_probe.setVideoOutput(video_probe)
+                media_probe.setSource(QUrl.fromLocalFile(str(clean)))
+                deadline=time.monotonic()+10
+                while media_probe.mediaStatus() in (QMediaPlayer.MediaStatus.LoadingMedia,QMediaPlayer.MediaStatus.NoMedia) and time.monotonic()<deadline:
+                    application.processEvents();time.sleep(.01)
+                if media_probe.error()!=QMediaPlayer.Error.NoError or media_probe.mediaStatus()==QMediaPlayer.MediaStatus.InvalidMedia:
+                    raise RuntimeError('Frozen join preview decoder failed: '+media_probe.errorString())
+                media_probe.stop();media_probe.setSource(QUrl());application.processEvents()
+                approved=align_script('Verified export',[],.4)
+                for word in approved['words']:word['needs_approval']=False
+                approved.update(source=dict(scene=str(clean),width=64,height=64,fps=30,audio=False),
+                    render_project=dict(groups=['Verified export'],settings=dict(font_size=10,foreground='#FFFFFF')),
+                    output_stem=str(Path(directory)/'approved'),advanced_mode='assisted',cuts=[])
+                export=ExportDialog(window,approved,Path(directory)/'review.alignment.json')
+                deadline=time.monotonic()+30
+                while 'exports' not in approved and time.monotonic()<deadline:
+                    application.processEvents();time.sleep(.01)
+                    if export.worker is not None and not export.worker.isRunning() and 'Export stopped' in export.status.text():break
+                if 'exports' not in approved:raise RuntimeError('Frozen approved export failed: '+export.status.text())
+                while export.worker.isRunning():application.processEvents();time.sleep(.01)
+                application.processEvents();export.close()
+                if not Path(approved['exports']['baseline']).is_file() or not Path(approved['exports']['edited']).is_file():
+                    raise RuntimeError('Frozen comparison exports missing')
                 from app import ContinuousVideoDecoder
                 decoder = ContinuousVideoDecoder.__new__(ContinuousVideoDecoder)
                 decoder.path, decoder.ffmpeg = str(saved), resolve_ffmpeg()
@@ -107,7 +140,7 @@ def run():
             report = os.environ.get('COSMERE_SMOKE_REPORT')
             if report:
                 atomic_json(report, {'version': VERSION, 'qt': True, 'ffmpeg': bool(resolve_ffmpeg()),
-                                     'discard': True, 'save': True, 'reader_size': window.reader.font_size_control.value()})
+                                     'discard': True, 'save': True, 'approved_export':True, 'reader_size': window.reader.font_size_control.value()})
             # Avoid mutating user settings or triggering save prompts in CI.
             application.quit()
         if root and token and len(token) == 32 and token.isalnum():

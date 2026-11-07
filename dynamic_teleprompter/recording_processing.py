@@ -49,7 +49,7 @@ def align_script(script, recognized, duration):
     return dict(schema=1, script=script, duration=duration, words=words)
 
 
-def kept_segments(duration, silences, internal=False, padding=.15):
+def kept_segments(duration, silences, internal=False, padding=.15, minimum_pause=.6):
     """Remove edge silence; optionally shorten internal pauses, preserving padding."""
     if any(a <= .05 and b >= duration - .05 for a, b in silences):
         return [(0., duration)]
@@ -62,7 +62,7 @@ def kept_segments(duration, silences, internal=False, padding=.15):
             removed.append((0., max(0., end - padding)))
         elif end >= duration - .05:
             removed.append((min(duration, start + padding), duration))
-        elif internal and end - start > .6:
+        elif internal and end - start > minimum_pause:
             removed.append((start + padding, end - padding))
     cursor, kept = 0., []
     for start, end in sorted(removed):
@@ -106,7 +106,11 @@ def process_recording(source, ffmpeg, options, script, model_path, duration, dir
                 start = None
         if start is not None:
             silences.append((start, duration))
-        segments = kept_segments(duration, silences, trim == 'pauses')
+        segments = kept_segments(duration, silences, trim == 'pauses', minimum_pause=float(options.get('minimum_pause', .6)))
+        fps=float(options.get('source_fps',0))
+        if fps>0:
+            segments=[(max(0.,round(a*fps)/fps),min(duration,round(b*fps)/fps)) for a,b in segments]
+            segments=[(a,b) for a,b in segments if b>a]
         result['trim_segments'] = segments
         if segments != [(0., duration)]:
             if len(segments) > 100:
@@ -146,5 +150,13 @@ def process_recording(source, ffmpeg, options, script, model_path, duration, dir
                 if recognizer.AcceptWaveform(block):
                     recognized.extend(json.loads(recognizer.Result()).get('result', []))
         recognized.extend(json.loads(recognizer.FinalResult()).get('result', []))
-        result['alignment'] = align_script(script, recognized, duration)
+        from edit_pipeline import propose_retakes
+        cuts=propose_retakes(script,recognized) if options.get('advanced','off')!='off' else []
+        preferred=[word for word in recognized if not any(cut['start']<=float(word['start'])<cut['end'] for cut in cuts)]
+        result['alignment'] = align_script(script, preferred, duration)
+        result['alignment']['recognized'] = recognized
+        result['alignment']['advanced_mode'] = options.get('advanced','off')
+        for cut in cuts:
+            cut['approved'] = options.get('advanced')=='automatic' and cut['confidence']>=.95
+        result['alignment']['cuts'] = cuts
     return current, result

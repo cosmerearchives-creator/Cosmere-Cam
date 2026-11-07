@@ -40,7 +40,12 @@ def resolve_ffmpeg(configured=''):
 
 
 class CanvasRecorder:
-    def __init__(self, filename, width, height, fps, microphone=True, ffmpeg_path="", audio_gain=100, audio_gate_db=-60, audio_gate_enabled=False, audio_chain=None, audio_clip_drive=150):
+    def __init__(self, filename, width, height, fps, microphone=True, ffmpeg_path="", audio_gain=100, audio_gate_db=-60, audio_gate_enabled=False, audio_chain=None, audio_clip_drive=150, editable=False, alpha=False):
+        self.editable = editable
+        self.alpha = alpha
+        self.companions = []
+        self.editable_failed=False
+        self.render_project = {}
         self.path = Path(filename)
         self.width, self.height, self.fps = int(width), int(height), int(fps)
         self.microphone = microphone
@@ -103,10 +108,13 @@ class CanvasRecorder:
         self._silent = Path(self._temp.name) / 'video.mp4'
         self._wave = Path(self._temp.name) / 'microphone.wav'
         command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
-                   '-f', 'rawvideo', '-pixel_format', 'rgba', '-video_size',
+                   '-f', 'rawvideo', '-pixel_format', 'bgra', '-video_size',
                    f'{self.width}x{self.height}', '-framerate', str(self.fps),
                    '-i', 'pipe:0', '-an', '-c:v', 'libx264', '-preset', 'ultrafast',
-                   '-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(self._silent)]
+                   '-threads','2','-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(self._silent)]
+        if self.alpha:
+            self._silent = Path(self._temp.name) / 'foreground.mov'
+            command = command[:command.index('-c:v')] + ['-c:v','qtrle','-threads','2','-pix_fmt','argb',str(self._silent)]
         self._video = subprocess.Popen(command, stdin=subprocess.PIPE,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -135,6 +143,13 @@ class CanvasRecorder:
         except Exception:
             self.abort()
             raise
+        if self.editable:
+            for name,alpha in [('background.mp4',False),('foreground.mov',True)]:
+                companion=CanvasRecorder(Path(self._temp.name)/name,self.width,self.height,self.fps,
+                                         microphone=False,ffmpeg_path=self._ffmpeg,alpha=alpha)
+                companion.start()
+                companion.frames_due=lambda c=companion:max(0,self.frame_count-c.frame_count)
+                self.companions.append(companion)
         self._started = time.monotonic()
         self._writer = threading.Thread(target=self._write_frames, daemon=True)
         self._writer.start()
@@ -150,12 +165,12 @@ class CanvasRecorder:
         self.capture_total_ms += elapsed_ms
         self.capture_max_ms = max(self.capture_max_ms, elapsed_ms)
 
-    def push_frame(self, image):
+    def push_frame(self, image, background=None, foreground=None):
         if self.stopping or self.error:
             return
-        # Use one Qt conversion and keep a copy of pixels; no Qt objects enter threads.
-        rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
-        data = bytes(rgba.constBits())
+        # QImage is reentrant and implicitly shared. Queue an owned image snapshot;
+        # conversion and byte copies belong to the encoder worker, never the UI.
+        data = QImage(image)
         due = min(self.frames_due(), self.fps * 2)
         if due > 1:
             self.late_frames += due - 1
@@ -172,14 +187,30 @@ class CanvasRecorder:
             self.frame_count += 1
             self.peak_queue_depth = max(self.peak_queue_depth, self._frames.qsize())
         self._last_bytes = data
+        if self.companions:
+            if background is None or foreground is None:
+                self.error='Editable source frame missing; stopped to preserve synchronization.'
+                return
+            for companion,frame in zip(self.companions,(background,foreground)):
+                companion.push_frame(frame)
+                if companion.error:
+                    self.editable_failed=True
+                    self.processing_error='Editable source could not keep up; captured video retained. '+str(companion.error)
 
     def _write_frames(self):
         try:
+            last_key=None;last_pixels=None;last_image=None
             while not self.cancelled:
                 pixels = self._frames.get()
                 if pixels is None:
                     break
                 write_started = time.perf_counter()
+                if isinstance(pixels,QImage):
+                    key=pixels.cacheKey()
+                    if key!=last_key:
+                        last_image=pixels.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+                        last_pixels=last_image.constBits();last_key=key
+                    pixels=last_pixels
                 self._video.stdin.write(pixels)
                 elapsed_ms = (time.perf_counter() - write_started) * 1000
                 self.encoder_writes += 1
@@ -306,6 +337,7 @@ class CanvasRecorder:
                 raise RuntimeError('Encoder frame writer timed out')
             self._video.stdin.close()
             diagnostics = self._video.stderr.read().decode('utf-8', 'replace')
+            self._video.stderr.close()
             code = self._video.wait(timeout=60)
             if code != 0:
                 raise RuntimeError('FFmpeg video encoding failed: ' + diagnostics[-1500:])
@@ -323,18 +355,64 @@ class CanvasRecorder:
                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             else:
                 shutil.copyfile(self._silent, ready)
+            # Finish all editable tracks before analysis; each has exactly the main frame count.
+            for companion in self.companions:
+                if companion.error:
+                    self.editable_failed=True
+                    try:companion.abort()
+                    except Exception:pass
+                else:companion.finish_async()
+            deadline=time.monotonic()+180
+            for companion in self.companions:
+                while not companion.finished and time.monotonic()<deadline:time.sleep(.02)
+                if not companion.finished or companion.error or companion.frame_count!=self.frame_count:
+                    self.editable_failed=True
+                    self.processing_error='Editable source encoding failed; captured video retained. '+str(companion.error)
+            if self.editable_failed:
+                self.processing_options={**self.processing_options,'align':False,'advanced':'off'}
             selected = ready
+            editable_ready=None
+            if self.companions and not self.editable_failed and self.processing_options.get('align'):
+                editable_ready=ready.with_name('editable.mp4')
+                if self.microphone and self._wave.exists():
+                    subprocess.run([self._ffmpeg,'-y','-v','error','-i',str(self.companions[0].path),'-i',str(self._wave),
+                        '-map','0:v','-map','1:a','-c:v','copy','-c:a','aac','-shortest',str(editable_ready)],
+                        check=True,capture_output=True,timeout=180,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                else:shutil.copyfile(self.companions[0].path,editable_ready)
+                selected=editable_ready
             if self.processing_options:
                 try:
                     from recording_processing import process_recording
-                    selected, self.processing_result = process_recording(ready, self._ffmpeg,
-                        self.processing_options, self.script, self.model_path,
+                    selected, self.processing_result = process_recording(selected, self._ffmpeg,
+                        {**self.processing_options,'source_fps':self.fps}, self.script, self.model_path,
                         self.frame_count / self.fps, ready.parent,
                         lambda stage: setattr(self, 'processing_stage', stage))
                 except Exception as exc:
                     self.processing_error = str(exc)
                     selected = ready  # Optional processing must never destroy a take.
-            import os
+            if 'alignment' in self.processing_result and editable_ready is not None:
+                from edit_pipeline import cut_media, publish_file
+                from update_core import atomic_json
+                bundle=self.path.with_suffix('.take')
+                with tempfile.TemporaryDirectory(prefix='.'+self.path.stem+'-',dir=self.path.parent) as folder:
+                    stage=Path(folder)
+                    shutil.copyfile(selected,stage/'scene.mp4')
+                    shutil.copyfile(ready,stage/'capture.mp4')
+                    segments=self.processing_result['trim_segments']
+                    foreground=self.companions[1].path
+                    if segments!=[(0.,self.frame_count/self.fps)]:
+                        cut_media(foreground,stage/'foreground.mov',segments,self._ffmpeg,stage,audio=False,alpha=True)
+                    else:shutil.copyfile(foreground,stage/'foreground.mov')
+                    # Bundle is new and uniquely named. Its source media is never overwritten by export.
+                    os.replace(stage,bundle)
+                data=self.processing_result['alignment']
+                data['source']=dict(scene=str(bundle/'scene.mp4'),foreground=str(bundle/'foreground.mov'),
+                    original=str(bundle/'capture.mp4'),foreground_premultiplied=True,fps=self.fps,width=self.width,height=self.height,audio=self.microphone)
+                data['render_project']=self.render_project
+                data['output_stem']=str(self.path.with_suffix(''))
+                atomic_json(self.path.with_suffix('.alignment.json'),data)
+                self.awaiting_review=True
+                return
             # Stage beside destination so recordings on another drive also
             # publish atomically; failed copies never appear as finished MP4s.
             fd, staged = tempfile.mkstemp(prefix='.' + self.path.stem + '-', suffix='.partial', dir=self.path.parent)
@@ -351,6 +429,14 @@ class CanvasRecorder:
                 atomic_json(self.path.with_suffix('.alignment.json'), self.processing_result['alignment'])
         except Exception as exc:
             self.error = str(exc)
+            # If analysis/source retention fails after capture encoding, recover the playable take.
+            candidate=locals().get('ready')
+            if candidate is not None and Path(candidate).is_file() and not self.path.exists():
+                try:
+                    from edit_pipeline import publish_file
+                    publish_file(candidate,self.path)
+                    self.error+='; captured take recovered at '+str(self.path)
+                except OSError:pass
         finally:
             try:
                 if self.frame_count:
@@ -372,6 +458,8 @@ class CanvasRecorder:
                 operation()
             except Exception as exc:
                 errors.append(str(exc))
+        for companion in self.companions:
+            attempt(companion.abort)
         if self._stream is not None:
             attempt(self._stream.stop)
             attempt(self._stream.close)

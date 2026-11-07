@@ -28,9 +28,19 @@ def read_token():
         return ''
 
 
+def export_in_progress(window):
+    from PySide6.QtWidgets import QDialog
+    for dialog in window.findChildren(QDialog):
+        worker=getattr(dialog,'worker',None)
+        timer=getattr(dialog,'timer',None)
+        if (worker is not None and worker.isRunning()) or (timer is not None and timer.isActive()):
+            return True
+    return False
+
+
 def critical_operation(window):
     controller = vars(window).get('plugin_controller')
-    return (bool(controller and controller.preparing) or window.recorder is not None or window.audio_monitor is not None or
+    return ((export_in_progress(window) if isinstance(window,QObject) else False) or bool(controller and controller.preparing) or window.recorder is not None or window.audio_monitor is not None or
             any(worker is not None and worker.isRunning() for worker in (
                 getattr(window, 'voice_worker', None), getattr(window, 'test_voice_worker', None),
                 getattr(window, 'downloader', None))))

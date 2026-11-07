@@ -81,7 +81,7 @@ QToolTip { background: #29262F; color: #F7F5F0; border: 1px solid #6E5C87; paddi
 QSplitter::handle { background: #DFD5E8; }
 QStatusBar { background: #EDE7F3; color: #6E5C87; }
 QTextEdit#readerText { background: #29262F; color: #F7F5F0; border: none; border-radius: 20px; padding: 22px; }
-QTextEdit#scriptEditor { background: #29262F; color: #F7F5F0; border: none; border-radius: 18px; padding: 16px; }
+QTextEdit#scriptEditor { color: #F7F5F0; background: #29262F; color: #F7F5F0; border: none; border-radius: 18px; padding: 16px; }
 QLabel#readerStatus { color: #6E5C87; font-size: 12pt; font-weight: 600; padding: 6px; }
 '''
 
