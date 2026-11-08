@@ -67,6 +67,21 @@ class Recovery(unittest.TestCase):
             result=subprocess.run([resolve_ffmpeg(),'-v','error','-i',str(r.path.with_suffix('.recovery.mkv')),'-map','0:v:1','-frames:v','1','-f','rawvideo','-pix_fmt','gray','pipe:1'],capture_output=True,check=True,timeout=15)
             self.assertEqual(result.stdout,expected.tobytes())
 
+    def test_watchdog_persists_stall_evidence_before_shutdown(self):
+        import json
+        with tempfile.TemporaryDirectory() as folder:
+            r=CanvasRecorder(Path(folder)/'stalled.mp4',64,64,10,microphone=False)
+            r._encoder_pending_since=time.monotonic()-3
+            worker=threading.Thread(target=r._watch_workers);worker.start()
+            target=r.path.with_suffix('.stall.json');deadline=time.monotonic()+2
+            try:
+                while not target.exists() and time.monotonic()<deadline:time.sleep(.01)
+                data=json.loads(target.read_text())
+                self.assertGreater(data['worker_stalls'][0]['waits']['encoder'],2)
+                self.assertTrue(data['worker_stalls'][0]['threads'])
+            finally:r.finished=True;worker.join(1)
+            r.abort();self.assertFalse(target.exists())
+
     def test_pause_rejects_capture_without_waiting_for_device_close(self):
         r=CanvasRecorder('unused.mp4',64,64,10);r._started=time.monotonic();r._stream=Mock()
         r.pause_capture();self.assertTrue(r.stopping);r._stream.stop.assert_not_called()

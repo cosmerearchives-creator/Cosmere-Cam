@@ -187,7 +187,8 @@ class CanvasRecorder:
         self._started = time.monotonic()
         self._writer = threading.Thread(target=self._write_frames, daemon=True)
         self._writer.start()
-        threading.Thread(target=self._watch_workers,name="Recording watchdog",daemon=True).start()
+        self._watchdog=threading.Thread(target=self._watch_workers,name="Recording watchdog",daemon=True)
+        self._watchdog.start()
 
     def _watch_workers(self):
         import traceback
@@ -201,6 +202,10 @@ class CanvasRecorder:
             frames=sys._current_frames()
             snapshot=dict(waits=waits,audio_stage=self.audio_stage,threads={thread.name:''.join(traceback.format_stack(frames[thread.ident])) for thread in threading.enumerate() if thread.ident in frames})
             self.worker_stalls=(self.worker_stalls+[snapshot])[-3:]
+            try:
+                from update_core import atomic_json
+                atomic_json(self.path.with_suffix('.stall.json'),dict(worker_stalls=self.worker_stalls))
+            except OSError:pass
             last_report=now
 
     def elapsed(self):
@@ -618,6 +623,9 @@ class CanvasRecorder:
                             pass
             if self._temp is not None:
                 attempt(self._temp.cleanup)
+        watchdog=getattr(self,'_watchdog',None)
+        if watchdog is not None:watchdog.join(timeout=1)
+        attempt(lambda:self.path.with_suffix('.stall.json').unlink(missing_ok=True))
         if errors:
             raise RuntimeError('; '.join(errors))
         self.finished = True
