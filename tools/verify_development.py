@@ -239,6 +239,8 @@ def main():
         assert fps >= 20, fps
         assert len(app.VIDEO_FRAMES.decoders) == 2
         assert all(decoder.serial >= 30 for decoder in app.VIDEO_FRAMES.decoders.values())
+        assert all((decoder.width,decoder.height)==(1080,608) for decoder in app.VIDEO_FRAMES.decoders.values())
+        assert all(len(decoder.latest)==decoder.width*decoder.height*4 for decoder in app.VIDEO_FRAMES.decoders.values())
         results['two_video_synthetic_model_canvas_fps'] = round(fps,2)
         results['canvas_call_mean_ms'] = round(sum(samples)/len(samples),2)
         results['video_source_resolution'] = [1280,720]
