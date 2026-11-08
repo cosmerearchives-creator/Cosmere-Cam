@@ -389,6 +389,18 @@ def _draw_live2d_sync(painter, layer, canvas_size):
 
 
 
+def visible_bounds(image):
+    """Crop transparent margins for painting only; model coordinates stay unchanged."""
+    import numpy as np
+    pixels=np.frombuffer(image.constBits(),dtype=np.uint8).reshape(image.height(),image.bytesPerLine())
+    alpha=pixels[:,:image.width()*4].reshape(image.height(),image.width(),4)[:,:,3]
+    rows=np.flatnonzero(np.any(alpha,axis=1));cols=np.flatnonzero(np.any(alpha,axis=0))
+    if not len(rows) or not len(cols):return (0,0,0,0)
+    left=max(0,int(cols[0])-1);top=max(0,int(rows[0])-1)
+    right=min(image.width(),int(cols[-1])+2);bottom=min(image.height(),int(rows[-1])+2)
+    return (left,top,right-left,bottom-top)
+
+
 class PoseWorker:
     """One model owner; coalesce poses instead of queuing obsolete frames.
 
@@ -426,12 +438,14 @@ class PoseWorker:
                 _draw_live2d_sync(painter, layer, size)
             finally:
                 painter.end()
+            image._visible_bounds=visible_bounds(image)
             with self.condition:
                 self.latest = image
                 self.render_ms = (time.perf_counter() - started) * 1000
                 self.updated = time.monotonic()
             # Bound CPU work while always taking the newest available pose.
-            time.sleep(max(0., 1 / 30 - (time.perf_counter() - started)))
+            interval=max(1/30,min(1/15,self.render_ms/1000*3))
+            time.sleep(max(0.,interval-(time.perf_counter()-started)))
 
     def retire(self):
         with self.condition:
@@ -521,6 +535,9 @@ def draw_live2d(painter, layer, canvas_size):
         painter.translate(-w / 2, -h / 2)
         painter.setOpacity(max(0, min(1, float(layer.get('opacity', 100)) / 100)))
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        painter.drawImage(QRectF(0, 0, w, h), image)
+        bounds=getattr(image,'_visible_bounds',(0,0,image.width(),image.height()))
+        x,y,bw,bh=bounds
+        if bw and bh:
+            painter.drawImage(QRectF(x*w/image.width(),y*h/image.height(),bw*w/image.width(),bh*h/image.height()),image,QRectF(x,y,bw,bh))
     finally:
         painter.restore()

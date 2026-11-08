@@ -87,7 +87,7 @@ def main():
                 return True
             def draw(self, painter, w, h):
                 time.sleep(.13)
-                painter.fillRect(0, 0, w, h, QColor('#2244aa'))
+                painter.fillRect(round(w*.3),round(h*.45),round(w*.4),round(h*.5),QColor('#2244aa'))
         live._core = Mock(load=lambda path: SlowModel())
         image = QImage(320, 240, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(Qt.GlobalColor.transparent)
@@ -233,6 +233,9 @@ def main():
             qt.processEvents()
             time.sleep(.005)
         fps = (window.out.render_count-rendered)/(time.monotonic()-started)
+        print('Regular canvas profile:',fps,'stages',window.out.render_stages,flush=True)
+        if fps<20:
+            live.close_render_workers();app.VIDEO_FRAMES.shutdown()
         assert fps >= 20, fps
         assert len(app.VIDEO_FRAMES.decoders) == 2
         assert all(decoder.serial >= 30 for decoder in app.VIDEO_FRAMES.decoders.values())
@@ -241,8 +244,10 @@ def main():
         results['video_source_resolution'] = [1280,720]
         results['live2d_fixture_is_synthetic'] = True
         # Exercise the extra editable tracks at the real portrait canvas size.
-        window.media_layers=[dict(type='live2d',path='synthetic-model',visible=True,scale=.4),
-                             dict(type='text',visible=True)]+window.media_layers[2:]
+        window.media_layers=[dict(type='live2d',path='synthetic-model',visible=True,scale=.8),
+            dict(type='video',path=str(bench_source),visible=True,loop=True,y=-35),
+            dict(type='video',path=str(second),visible=True,loop=True,y=-5),
+            dict(type='text',visible=True)]
         window.render()
         window.out.capture_editable=True
         editable=CanvasRecorder(temp/'editable-benchmark.mp4',1080,1920,30,microphone=False,editable=True)
@@ -267,6 +272,7 @@ def main():
             live.close_render_workers();app.VIDEO_FRAMES.shutdown()
         assert captures/elapsed>=20, captures/elapsed
         results['editable_portrait_capture_fps']=round(captures/elapsed,2)
+        results['editable_foreground_heavy_layout']=True
         results['editable_tracks_frame_counts']=[editable.frame_count]+[track.frame_count for track in editable.companions]
         assert len(set(results['editable_tracks_frame_counts']))==1
         window.out.capture_editable=False

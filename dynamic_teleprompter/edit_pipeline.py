@@ -55,37 +55,79 @@ def remap_alignment(data,kept):
     return result
 
 
+def normalize_word(word):
+    """Normalize punctuation for matching, preserving original display words."""
+    import unicodedata
+    return re.sub(r"[^\w]",'',unicodedata.normalize('NFKC',word).casefold())
+
+
 def propose_retakes(script,recognized):
-    """Suggest only local script-anchored repeats. Uncertain cuts require approval."""
-    normalize=lambda text:re.sub(r"[^\w']",'',text.casefold())
-    target=[normalize(w) for w in script.split()]
-    heard=[normalize(w.get('word','')) for w in recognized]
-    cuts=[];covered=-1
-    for i in range(len(heard)):
-        if i<=covered:continue
-        for j in range(i+2,min(len(heard),i+20)):
-            if float(recognized[j]['start'])-float(recognized[i]['start'])>25:break
-            n=0
-            while i+n<j and j+n<len(heard) and heard[i+n]==heard[j+n] and heard[i+n]:n+=1
-            if n<2:continue
-            phrase=heard[j:j+n]
-            anchors=[k for k in range(len(target)-n+1) if target[k:k+n]==phrase]
-            if len(anchors)!=1:continue
-            anchor=anchors[0];complete=0
-            while j+complete<len(heard) and anchor+complete<len(target) and heard[j+complete]==target[anchor+complete]:complete+=1
-            if complete<max(3,n):continue
-            # Abandoned prefix or repeated full sentence; skip intentional repetition in the script.
-            first_end=i+n
-            if first_end<j and j-first_end>3:continue
-            gap=float(recognized[j]['start'])-float(recognized[j-1]['end'])
-            if gap<.25:continue
-            confident=n>=5 and complete>=n and gap>=.4 and all(float(w.get('conf',1))>=.85 for w in recognized[i:j+complete])
-            cuts.append(dict(start=max(0.,float(recognized[i]['start'])-.06),end=max(0.,float(recognized[j]['start'])-.06),
-                reason='Repeated or abandoned attempt: '+' '.join(w['word'] for w in recognized[i:j]),
-                confidence=.97 if confident else .7,approved=False))
-            covered=j-1
-            break
-    return cuts
+    """Find long/imperfect restarts from unique script anchors; uncertain cuts stay manual."""
+    from collections import defaultdict
+    from difflib import SequenceMatcher
+    original=script.split();target=[normalize_word(w) for w in original]
+    heard=[normalize_word(w.get('word','')) for w in recognized]
+    if len(target)<3 or len(heard)<4:return []
+    def similar(a,b):
+        return a==b or (min(len(a),len(b))>=4 and SequenceMatcher(None,a,b).ratio()>=.78)
+    anchors={}
+    for width in (2,3):
+        index=defaultdict(list)
+        for i in range(len(target)-width+1):index[tuple(target[i:i+width])].append(i)
+        for key,positions in index.items():
+            if len(positions)==1:anchors[key]=positions[0]
+    events=defaultdict(list)
+    for i in range(len(heard)-1):
+        for width in (2,3):
+            key=tuple(heard[i:i+width])
+            if key in anchors:events[(anchors[key],width)].append(i)
+    candidates=[]
+    for (anchor,width),occurrences in events.items():
+        for i,j in zip(occurrences,occurrences[1:]):
+            if j-i>160 or float(recognized[j]['start'])-float(recognized[i]['start'])>90:continue
+            left,right,position=i,j,anchor;errors=0
+            # Recover words before an anchor, including a few ASR mistakes,
+            # without reaching back across a script sentence boundary.
+            while position>0 and left>0 and right>i+1 and anchor-position<64:
+                if re.search(r'[.!?][\"\u201d\u2019)]*$',original[position-1]):break
+                x,y,z=heard[left-1],heard[right-1],target[position-1]
+                if not (similar(x,z) or similar(y,z) or similar(x,y)):
+                    errors+=1
+                    if errors>2:break
+                left-=1;right-=1;position-=1
+            attempt=heard[left:right];reference=target[position:position+min(100,len(attempt)+12)]
+            evidence=sum(block.size for block in SequenceMatcher(None,attempt,reference,autojunk=False).get_matching_blocks())
+            if evidence<2 or evidence/max(1,len(attempt))<.45:continue
+            retained=heard[right:right+min(100,max(12,len(attempt)+8))]
+            blocks=SequenceMatcher(None,retained,reference,autojunk=False).get_matching_blocks()
+            retained_evidence=sum(block.size for block in blocks)
+            if retained_evidence<3:continue
+            if not any(block.size>=width and block.a<=anchor-position+2 and block.b<=anchor-position+2 for block in blocks):continue
+            exact=0
+            while left+exact<right and right+exact<len(heard) and heard[left+exact]==heard[right+exact]:exact+=1
+            gap=float(recognized[right]['start'])-float(recognized[right-1]['end']) if right else 0
+            confident=(exact>=5 and gap>=.4 and evidence/max(1,len(attempt))>=.8
+                       and retained_evidence>=evidence and all(float(w.get('conf',1))>=.85 for w in recognized[left:right+exact]))
+            candidates.append(dict(first=left,second=right,position=position,confidence=.97 if confident else .7))
+    # Prefer full-sentence restarts before inner stutters. Otherwise a small
+    # repeated phrase inside a failed take can hide its larger restart chain.
+    boundary=lambda item:item['position']==0 or bool(re.search(r'[.!?][\"\u201d\u2019)]*$',original[item['position']-1]))
+    accepted=[]
+    for full_sentence in (True,False):
+        for item in sorted(candidates,key=lambda item:(item['second'],item['first'])):
+            if boundary(item)!=full_sentence:continue
+            if any(item['first']<other['second'] and item['second']>other['first'] for other in accepted):continue
+            accepted.append(item)
+    selected=[]
+    for item in sorted(accepted,key=lambda item:item['first']):
+        left,right=item['first'],item['second']
+        cut=dict(start=max(0.,float(recognized[left]['start'])-.06),end=max(0.,float(recognized[right]['start'])-.06),
+                 reason='Restarted passage: '+' '.join(original[item['position']:item['position']+10]),
+                 confidence=item['confidence'],approved=False)
+        if selected and abs(selected[-1]['end']-cut['start'])<.12:
+            selected[-1]['end']=cut['end'];selected[-1]['confidence']=min(selected[-1]['confidence'],cut['confidence'])
+        else:selected.append(cut)
+    return selected
 
 
 def run_media(command,cancel=None):
@@ -119,7 +161,7 @@ def publish_file(source,destination):
     finally:Path(stage).unlink(missing_ok=True)
 
 
-def cut_media(source,target,segments,ffmpeg,directory,*,audio=True,alpha=False,cancel=None):
+def cut_media(source,target,segments,ffmpeg,directory,*,audio=True,alpha=False,premultiplied=False,cancel=None):
     filters=[]
     for index,(start,end) in enumerate(segments):
         filters.append(f'[0:v]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS[v{index}]')
@@ -127,9 +169,12 @@ def cut_media(source,target,segments,ffmpeg,directory,*,audio=True,alpha=False,c
     inputs=''.join(f'[v{i}]'+(f'[a{i}]' if audio else '') for i in range(len(segments)))
     filters.append(inputs+f'concat=n={len(segments)}:v=1:a={int(audio)}[v]'+('[a]' if audio else ''))
     graph=Path(directory)/('cut-'+Path(target).stem+'.ffscript');graph.write_text(';'.join(filters),encoding='utf-8')
-    command=[ffmpeg,'-y','-v','error','-i',str(source),'-/filter_complex',str(graph),'-map','[v]']
+    from recorder import supports_alpha_conversion
+    tagged=alpha and premultiplied and supports_alpha_conversion(ffmpeg)
+    command=[ffmpeg,'-y','-v','error']+(['-alpha_mode','premultiplied'] if tagged else [])+['-i',str(source),'-/filter_complex',str(graph),'-map','[v]']
     if audio:command+=['-map','[a]','-c:a','aac','-b:a','160k']
     command+=['-c:v','qtrle','-pix_fmt','argb'] if alpha else ['-c:v','libx264','-preset','veryfast','-crf','18','-pix_fmt','yuv420p']
+    if tagged:command+=['-alpha_mode','premultiplied']
     run_media(command+['-movflags','+faststart',str(target)],cancel)
 
 
@@ -171,9 +216,16 @@ def export_videos(data,concat,output_stem,ffmpeg,work,progress,cancel):
     command=[ffmpeg,'-y','-v','error','-i',str(source),'-safe','0','-i',str(concat)]
     graph=f'[1:v]fps={data["source"]["fps"]},format=rgba[captions];[0:v][captions]overlay=eof_action=repeat:shortest=0[texted]'
     if foreground:
-        command+=['-i',str(foreground)]
-        alpha='premultiplied' if data['source'].get('foreground_premultiplied') else 'straight'
-        graph+=f';[texted][2:v]overlay=eof_action=repeat:shortest=0:alpha={alpha}[v]'
+        from recorder import supports_alpha_conversion
+        premult=data['source'].get('foreground_premultiplied',False)
+        tagged=premult and supports_alpha_conversion(ffmpeg)
+        command+=(['-alpha_mode','premultiplied'] if tagged else [])+['-i',str(foreground)]
+        alpha='premultiplied' if tagged else 'straight'
+        if premult and not tagged:
+            graph+=';[2:v]unpremultiply=inplace=1[fore]'
+            fg='[fore]'
+        else:fg='[2:v]'
+        graph+=f';[texted]{fg}overlay=eof_action=repeat:shortest=0:format=rgb:alpha={alpha}[v]'
     else:graph+=';[texted]null[v]'
     graphfile=Path(work)/'overlay.ffscript';graphfile.write_text(graph,encoding='utf-8')
     command+=['-/filter_complex',str(graphfile),'-map','[v]','-map','0:a?','-t',str(data['duration']),'-c:v','libx264',
@@ -215,10 +267,17 @@ def preview_join(data,cut,ffmpeg,directory,cancel):
     foreground=data['source'].get('foreground')
     if not foreground:return scene
     fore=root/'preview-foreground.mov'
-    cut_media(foreground,fore,segments,ffmpeg,root,audio=False,alpha=True,cancel=cancel)
+    cut_media(foreground,fore,segments,ffmpeg,root,audio=False,alpha=True,premultiplied=data['source'].get('foreground_premultiplied',False),cancel=cancel)
     result=root/'join.mp4'
-    alpha='premultiplied' if data['source'].get('foreground_premultiplied') else 'straight'
-    run_media([ffmpeg,'-y','-v','error','-i',str(scene),'-i',str(fore),'-filter_complex',
-        f'[0:v][1:v]overlay=shortest=1:alpha={alpha}[v]','-map','[v]','-map','0:a?',
-        '-c:v','libx264','-preset','veryfast','-crf','18','-pix_fmt','yuv420p','-c:a','copy',str(result)],cancel)
+    from recorder import supports_alpha_conversion
+    premult=data['source'].get('foreground_premultiplied',False)
+    tagged=premult and supports_alpha_conversion(ffmpeg)
+    graph=''
+    if premult and not tagged:graph='[1:v]unpremultiply=inplace=1[fore];'
+    fg='[fore]' if premult and not tagged else '[1:v]'
+    alpha='premultiplied' if tagged else 'straight'
+    graph+=f'[0:v]{fg}overlay=shortest=1:format=rgb:alpha={alpha}[v]'
+    command=[ffmpeg,'-y','-v','error','-i',str(scene)]+(['-alpha_mode','premultiplied'] if tagged else [])+['-i',str(fore),'-filter_complex',graph,'-map','[v]','-map','0:a?',
+        '-c:v','libx264','-preset','veryfast','-crf','18','-pix_fmt','yuv420p','-c:a','copy',str(result)]
+    run_media(command,cancel)
     return result

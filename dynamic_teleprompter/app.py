@@ -28,7 +28,7 @@ from audio_diagnostics import snapshot as audio_diagnostics_snapshot, reset as r
 from audio_effects import DEFAULT_CHAIN, normalize_chain, EFFECT_NAMES, vst3_backend_available, plugin_errors, inspect_vst3_parameters
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, Signal, QThread, QEvent, QPoint, QSettings, QSize
-from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut, QTextCursor, QTextCharFormat, QSyntaxHighlighter, QPainter, QPainterPath, QPen, QTextDocument, QIcon, QPixmap, QImage, QTransform
+from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut, QTextCursor, QTextCharFormat, QSyntaxHighlighter, QPainter, QPainterPath, QPen, QTextDocument, QIcon, QPixmap, QImage, QTransform, QRegion
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox,
     QFileDialog, QFontComboBox, QFormLayout, QGridLayout, QGroupBox,
@@ -387,7 +387,7 @@ class StyledOutputLabel(QLabel):
         fraction = max(0.0, min(1.0, (elapsed - order * stagger) / duration))
         return fraction if self._phase == 'intro' else 1.0 - fraction
 
-    def _draw_styled(self, painter, path):
+    def _paint_style_path(self, painter, path):
         spec = self.visual
         if spec.get('shadow'):
             painter.save()
@@ -408,6 +408,46 @@ class StyledOutputLabel(QLabel):
                                           thickness * 2, Qt.PenStyle.SolidLine,
                                           Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.fillPath(path, QColor(spec.get('foreground', self.palette().color(self.foregroundRole()).name())))
+
+    def _draw_styled(self,painter,path):
+        transform=painter.transform()
+        # Preserve vector quality for zoom/rotation animations. Translation and
+        # fading can reuse exact raster passes instead of stroking each frame.
+        if abs(transform.m11()-1)>1e-6 or abs(transform.m22()-1)>1e-6 or abs(transform.m12())>1e-6 or abs(transform.m21())>1e-6:
+            return self._paint_style_path(painter,path)
+        key=(getattr(self,'_parts_key',None),repr(self.visual))
+        if key!=getattr(self,'_sprite_style_key',None):
+            self._sprite_style_key=key;self._style_sprites={}
+        cached=self._style_sprites.get(id(path))
+        if cached is None:
+            spec=self.visual;bounds=path.boundingRect()
+            margin=math.ceil(max(float(spec.get('glow_width',0))*1.5 if spec.get('glow') else 0,
+                float(spec.get('outline_width',0)),abs(float(spec.get('shadow_x',0))),abs(float(spec.get('shadow_y',0)))))+3
+            left=math.floor(bounds.left())-margin;top=math.floor(bounds.top())-margin
+            width=max(1,math.ceil(bounds.right())-left+margin);height=max(1,math.ceil(bounds.bottom())-top+margin)
+            passes=[]
+            def raster(draw):
+                pix=QPixmap(width,height);pix.fill(Qt.GlobalColor.transparent)
+                p=QPainter(pix);p.setRenderHint(QPainter.RenderHint.Antialiasing);p.translate(-left,-top)
+                draw(p);p.end();passes.append(pix)
+            if spec.get('shadow'):
+                def shadow(p):
+                    p.translate(spec.get('shadow_x',3),spec.get('shadow_y',3));p.fillPath(path,QColor(spec.get('shadow_color','#333333')))
+                raster(shadow)
+            if spec.get('glow'):
+                radius=spec.get('glow_width',5)
+                for extra,alpha in ((radius*3,35),(radius*2,55),(radius,90)):
+                    shade=QColor(spec.get('glow_color','#FFFF99'));shade.setAlpha(alpha)
+                    pen=QPen(shade,max(1,extra),Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap,Qt.PenJoinStyle.RoundJoin)
+                    raster(lambda p,pen=pen:p.strokePath(path,pen))
+            if spec.get('outline_width',0):
+                pen=QPen(QColor(spec.get('outline_color','#FFFFFF')),spec['outline_width']*2,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap,Qt.PenJoinStyle.RoundJoin)
+                raster(lambda p:p.strokePath(path,pen))
+            raster(lambda p:p.fillPath(path,QColor(spec.get('foreground',self.palette().color(self.foregroundRole()).name()))))
+            cached=(left,top,passes);self._style_sprites[id(path)]=cached
+        left,top,passes=cached
+        # Separate passes keep fade opacity identical to the vector renderer.
+        for image in passes:painter.drawPixmap(left,top,image)
 
     def paintEvent(self, event):
         if not self.text():
@@ -744,6 +784,8 @@ def source_image_pixmap(path):
     return pix
 
 
+SCALED_MEDIA_PIXMAP_CACHE = {}
+
 def draw_media_layers(painter, layers, canvas_size, foreground=False):
     """Draw image layers into native canvas coordinates, independently of preview size."""
     width, height = canvas_size
@@ -774,7 +816,18 @@ def draw_media_layers(painter, layers, canvas_size, foreground=False):
         painter.save()
         painter.setOpacity(max(0., min(1., float(layer.get('opacity', 100))/100)))
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        painter.drawPixmap(x, y, target_width, target_height, pix)
+        reuse=sum(1 for entry in layers if entry.get('visible',True) and entry.get('path')==path and float(entry.get('scale',1))==scale)>1
+        if reuse:
+            key=(int(pix.cacheKey()),target_width,target_height)
+            scaled=SCALED_MEDIA_PIXMAP_CACHE.get(key)
+            if scaled is None:
+                scaled=pix.scaled(target_width,target_height,Qt.AspectRatioMode.IgnoreAspectRatio,Qt.TransformationMode.SmoothTransformation)
+                scaled.setDevicePixelRatio(1)
+                SCALED_MEDIA_PIXMAP_CACHE[key]=scaled
+                while len(SCALED_MEDIA_PIXMAP_CACHE)>8:SCALED_MEDIA_PIXMAP_CACHE.pop(next(iter(SCALED_MEDIA_PIXMAP_CACHE)))
+            painter.drawPixmap(x,y,scaled)
+        else:
+            painter.drawPixmap(x,y,target_width,target_height,pix)
         painter.restore()
 
 
@@ -1647,7 +1700,7 @@ class OutputWindow(QWidget):
                         text.fill(Qt.GlobalColor.transparent)
                         tp = QPainter(text)
                         for label in labels:
-                            label.render(tp, label.pos())
+                            label.render(tp,label.pos(),QRegion(),QWidget.RenderFlag.DrawChildren)
                         tp.end()
                         self._text_pixmap, self._text_key = text, key
                     self._text_was_animated = animated
@@ -2837,7 +2890,7 @@ class MainWindow(QMainWindow):
             self.record_discard.setEnabled(True)
             self.audio_chain.setEnabled(False)
             self.record_status.setText('Recording: ' + str(filename))
-            self.record_timer.start(10)
+            self.record_timer.start(1)
             self._capture_record_frame()
             self._show_obs_window()
             self.out.setFocus(Qt.FocusReason.OtherFocusReason)
@@ -2869,7 +2922,7 @@ class MainWindow(QMainWindow):
                 recorder.push_frame(frame,self.out.editable_background,self.out.editable_foreground)
             else:
                 recorder.push_frame(frame)
-            recorder.note_capture((time.perf_counter() - capture_start) * 1000)
+            recorder.note_capture((time.perf_counter() - capture_start) * 1000,self.out.render_stages)
             recorder.render_stages = dict(getattr(self.out, 'render_stages', {}))
             if recorder.error:
                 raise RuntimeError(recorder.error)
@@ -3348,7 +3401,7 @@ class MainWindow(QMainWindow):
         record_form.addRow('Status:', self.record_status)
         self.keep_editable = QCheckBox('Prepare editable source for corrected text and advanced exports')
         self.keep_editable.setChecked(True)
-        self.keep_editable.setToolTip('Uses additional disk space and encoding work. Required to replace text after recording.')
+        self.keep_editable.setToolTip('Uses additional disk space and prepares source tracks after Stop. Required to replace text after recording.')
         record_form.addRow(self.keep_editable)
         review = QPushButton('Review saved word timings…')
         review.clicked.connect(self.open_alignment_review)

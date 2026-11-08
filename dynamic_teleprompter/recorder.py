@@ -14,6 +14,8 @@ import threading
 import time
 import wave
 import sys
+from types import SimpleNamespace
+from functools import lru_cache
 from pathlib import Path
 
 from PySide6.QtGui import QImage
@@ -39,10 +41,22 @@ def resolve_ffmpeg(configured=''):
     return None
 
 
+@lru_cache(maxsize=8)
+def supports_alpha_conversion(ffmpeg):
+    try:
+        result=subprocess.run([ffmpeg,'-hide_banner','-loglevel','error','-alpha_mode','premultiplied',
+            '-f','lavfi','-i','color=s=16x16','-frames:v','0','-f','null','-'],
+            capture_output=True,timeout=10,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        return result.returncode==0
+    except (OSError,subprocess.TimeoutExpired):return False
+
+
 class CanvasRecorder:
     def __init__(self, filename, width, height, fps, microphone=True, ffmpeg_path="", audio_gain=100, audio_gate_db=-60, audio_gate_enabled=False, audio_chain=None, audio_clip_drive=150, editable=False, alpha=False, lossless_rgb=False):
         self.editable = editable
+        self.packed=bool(editable)
         self.alpha = alpha
+        self.alpha_conversion_offloaded=False
         self.lossless_rgb=lossless_rgb
         self.companions = []
         self.editable_failed=False
@@ -76,6 +90,7 @@ class CanvasRecorder:
         self._stream = None
         self._last_bytes = None
         self.capture_calls = 0
+        self.capture_stage_totals={}
         self.capture_total_ms = 0.0
         self.capture_max_ms = 0.0
         self.encoder_writes = 0
@@ -118,6 +133,23 @@ class CanvasRecorder:
         if self.alpha:
             self._silent = Path(self._temp.name) / 'foreground.mov'
             command = command[:command.index('-c:v')] + ['-c:v','qtrle','-threads','1','-pix_fmt','argb',str(self._silent)]
+        if self.alpha and supports_alpha_conversion(ffmpeg):
+            self.alpha_conversion_offloaded=True
+            index=command.index('-i')
+            command[index:index]=['-alpha_mode','premultiplied']
+            command[-1:-1]=['-alpha_mode','premultiplied']
+        if self.packed:
+            self._silent=Path(self._temp.name)/'packed.mov'
+            self._packed_source=self._silent
+            command=[ffmpeg,'-y','-hide_banner','-loglevel','error','-f','rawvideo','-pixel_format','bgra',
+                     '-video_size',f'{self.width}x{self.height*3}','-framerate',str(self.fps),'-i','pipe:0',
+                     '-an','-c:v','qtrle','-pix_fmt','argb','-threads','1',str(self._silent)]
+            for name,alpha in [('background.mp4',False),('foreground.mov',True)]:
+                track=SimpleNamespace(path=Path(self._temp.name)/name,alpha=alpha,frame_count=0,error=None,finished=False,
+                    alpha_conversion_offloaded=True,encoder_write_total_ms=0.,encoder_writes=0,peak_queue_depth=0)
+                track.finish_async=lambda t=track:setattr(t,'finished',True)
+                track.abort=lambda t=track:setattr(t,'finished',True)
+                self.companions.append(track)
         self._video = subprocess.Popen(command, stdin=subprocess.PIPE,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                        creationflags=(getattr(subprocess, 'CREATE_NO_WINDOW', 0) | getattr(subprocess,'BELOW_NORMAL_PRIORITY_CLASS',0)))
@@ -146,13 +178,6 @@ class CanvasRecorder:
         except Exception:
             self.abort()
             raise
-        if self.editable:
-            for name,alpha in [('background.mp4',False),('foreground.mov',True)]:
-                companion=CanvasRecorder(Path(self._temp.name)/name,self.width,self.height,self.fps,
-                                         microphone=False,ffmpeg_path=self._ffmpeg,alpha=alpha,lossless_rgb=not alpha)
-                companion.start()
-                companion.frames_due=lambda c=companion:max(0,self.frame_count-c.frame_count)
-                self.companions.append(companion)
         self._started = time.monotonic()
         self._writer = threading.Thread(target=self._write_frames, daemon=True)
         self._writer.start()
@@ -163,9 +188,10 @@ class CanvasRecorder:
     def frames_due(self):
         return max(0, int(self.elapsed() * self.fps) + 1 - self.frame_count)
 
-    def note_capture(self, elapsed_ms):
+    def note_capture(self, elapsed_ms, stages=None):
         self.capture_calls += 1
         self.capture_total_ms += elapsed_ms
+        for key,value in (stages or {}).items():self.capture_stage_totals[key]=self.capture_stage_totals.get(key,0.)+value
         self.capture_max_ms = max(self.capture_max_ms, elapsed_ms)
 
     def push_frame(self, image, background=None, foreground=None):
@@ -173,7 +199,12 @@ class CanvasRecorder:
             return
         # QImage is reentrant and implicitly shared. Queue an owned image snapshot;
         # conversion and byte copies belong to the encoder worker, never the UI.
-        data = QImage(image)
+        if self.packed:
+            if background is None or foreground is None:
+                self.error='Editable source frame missing; capture stopped.'
+                return
+            data=tuple(QImage(part) for part in (image,background,foreground))
+        else:data=QImage(image)
         due = min(self.frames_due(), self.fps * 2)
         if due > 1:
             self.late_frames += due - 1
@@ -190,15 +221,8 @@ class CanvasRecorder:
             self.frame_count += 1
             self.peak_queue_depth = max(self.peak_queue_depth, self._frames.qsize())
         self._last_bytes = data
-        if self.companions:
-            if background is None or foreground is None:
-                self.error='Editable source frame missing; stopped to preserve synchronization.'
-                return
-            for companion,frame in zip(self.companions,(background,foreground)):
-                companion.push_frame(frame)
-                if companion.error:
-                    self.editable_failed=True
-                    self.processing_error='Editable source could not keep up; captured video retained. '+str(companion.error)
+        if self.packed:
+            for track in self.companions:track.frame_count=self.frame_count
 
     def _write_frames(self):
         try:
@@ -208,16 +232,23 @@ class CanvasRecorder:
                 if pixels is None:
                     break
                 write_started = time.perf_counter()
+                if isinstance(pixels,tuple):
+                    # Each plane occupies exactly one canvas-height of the packed frame.
+                    # QImage ownership keeps its zero-copy buffer alive through the write.
+                    for plane in pixels:
+                        native=plane.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+                        self._video.stdin.write(native.constBits())
+                    pixels=None
                 if isinstance(pixels,QImage):
                     key=pixels.cacheKey()
                     if key!=last_key:
                         # QuickTime alpha tracks use straight alpha. Keep the mode explicit
                         # instead of relying on FFmpeg-version-specific auto conversions.
-                        pixel_format=QImage.Format.Format_ARGB32 if self.alpha else QImage.Format.Format_ARGB32_Premultiplied
+                        pixel_format=QImage.Format.Format_ARGB32 if self.alpha and not self.alpha_conversion_offloaded else QImage.Format.Format_ARGB32_Premultiplied
                         last_image=pixels.convertToFormat(pixel_format)
                         last_pixels=last_image.constBits();last_key=key
                     pixels=last_pixels
-                self._video.stdin.write(pixels)
+                if pixels is not None:self._video.stdin.write(pixels)
                 elapsed_ms = (time.perf_counter() - write_started) * 1000
                 self.encoder_writes += 1
                 self.encoder_write_total_ms += elapsed_ms
@@ -309,6 +340,11 @@ class CanvasRecorder:
             'encoded_frames': self.frame_count, 'late_frames': self.late_frames,
             'duplicated_frames': self.duplicate_frames,
             'capture_calls': self.capture_calls,
+            'fresh_capture_fps':round(self.capture_calls/elapsed,2) if elapsed else 0,
+            'duplicate_frame_percent':round(100*self.duplicate_frames/max(1,self.frame_count),2),
+            'canvas_stage_mean_ms':{key:round(value/max(1,self.capture_calls),2) for key,value in self.capture_stage_totals.items()},
+            'editable_capture_mode':'packed_lossless' if self.packed else 'standard',
+            'editable_tracks':[dict(alpha=track.alpha,frames=track.frame_count,error=track.error) for track in self.companions],
             'capture_mean_ms': round(self.capture_total_ms / max(1, self.capture_calls), 2),
             'capture_max_ms': round(self.capture_max_ms, 2),
             'encoder_writes': self.encoder_writes,
@@ -351,6 +387,24 @@ class CanvasRecorder:
                 raise RuntimeError(self.error)
             if self.frame_count == 0:
                 raise RuntimeError('No frames were recorded')
+            if self.packed:
+                self.processing_stage='Preparing editable source tracks…'
+                captured=self._silent.with_name('captured.mp4')
+                graph=self._silent.with_name('unpack.ffscript')
+                graph.write_text(f'[0:v]split=3[c][b][f];[c]crop={self.width}:{self.height}:0:0[capture];'
+                    f'[b]crop={self.width}:{self.height}:0:{self.height}[background];'
+                    f'[f]crop={self.width}:{self.height}:0:{self.height*2}[foreground]',encoding='utf-8')
+                from edit_pipeline import run_media
+                tagged=supports_alpha_conversion(self._ffmpeg)
+                command=[self._ffmpeg,'-y','-v','error']+(['-alpha_mode','premultiplied'] if tagged else [])+[
+                    '-i',str(self._silent),'-/filter_complex',str(graph),
+                    '-map','[capture]','-c:v','libx264','-preset','veryfast','-crf','18','-pix_fmt','yuv420p','-threads','1',str(captured),
+                    '-map','[background]','-c:v','libx264rgb','-preset','ultrafast','-crf','0','-pix_fmt','bgr0','-threads','1',str(self.companions[0].path),
+                    '-map','[foreground]','-c:v','qtrle','-pix_fmt','argb','-threads','1']
+                if tagged:command+=['-alpha_mode','premultiplied']
+                command+=[str(self.companions[1].path)]
+                run_media(command)
+                self._silent=captured
             ready = self._silent.with_name('ready.mp4')
             if self.microphone and self._wave.exists() and self._wave.stat().st_size > 44:
                 command = [self._ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
@@ -407,13 +461,13 @@ class CanvasRecorder:
                     segments=self.processing_result['trim_segments']
                     foreground=self.companions[1].path
                     if segments!=[(0.,self.frame_count/self.fps)]:
-                        cut_media(foreground,stage/'foreground.mov',segments,self._ffmpeg,stage,audio=False,alpha=True)
+                        cut_media(foreground,stage/'foreground.mov',segments,self._ffmpeg,stage,audio=False,alpha=True,premultiplied=self.companions[1].alpha_conversion_offloaded)
                     else:shutil.copyfile(foreground,stage/'foreground.mov')
                     # Bundle is new and uniquely named. Its source media is never overwritten by export.
                     os.replace(stage,bundle)
                 data=self.processing_result['alignment']
                 data['source']=dict(scene=str(bundle/'scene.mp4'),foreground=str(bundle/'foreground.mov'),
-                    original=str(bundle/'capture.mp4'),foreground_premultiplied=False,fps=self.fps,width=self.width,height=self.height,audio=self.microphone)
+                    original=str(bundle/'capture.mp4'),foreground_premultiplied=self.companions[1].alpha_conversion_offloaded,fps=self.fps,width=self.width,height=self.height,audio=self.microphone)
                 data['render_project']=self.render_project
                 data['output_stem']=str(self.path.with_suffix(''))
                 atomic_json(self.path.with_suffix('.alignment.json'),data)
@@ -437,6 +491,21 @@ class CanvasRecorder:
             self.error = str(exc)
             # If analysis/source retention fails after capture encoding, recover the playable take.
             candidate=locals().get('ready')
+            if candidate is None and self.packed and getattr(self,'_packed_source',Path('missing')).is_file():
+                recovery=self.path.with_suffix('.recovery.mov')
+                try:
+                    try:os.replace(self._packed_source,recovery)
+                    except OSError:
+                        from edit_pipeline import publish_file
+                        publish_file(self._packed_source,recovery)
+                    from update_core import atomic_json
+                    atomic_json(recovery.with_suffix('.json'),dict(width=self.width,height=self.height,fps=self.fps,
+                        planes=['captured','background','foreground'],premultiplied=True,error=self.error))
+                    self.error+='; layered source recovered at '+str(recovery)
+                except OSError:
+                    self.error+='; temporary layered source retained at '+str(self._packed_source)
+                    self._temp._finalizer.detach();self._temp=None
+
             if candidate is not None and Path(candidate).is_file() and not self.path.exists():
                 try:
                     from edit_pipeline import publish_file
