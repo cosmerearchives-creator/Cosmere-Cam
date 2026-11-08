@@ -591,8 +591,8 @@ class ContinuousVideoDecoder:
         interval = 1. / fps
         while self.running:
             cmd = [self.ffmpeg, '-nostdin', '-hide_banner', '-loglevel', 'error',
-                   '-i', self.path, '-an', '-sn', '-vf', f'fps={fps:.6f},scale={width}:{height}',
-                   '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
+                   '-threads','1','-filter_threads','1','-i', self.path, '-an', '-sn', '-vf', f'fps={fps:.6f},scale={width}:{height}',
+                   '-f', 'rawvideo', '-pix_fmt', 'rgb24','-threads','1','pipe:1']
             try:
                 self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
