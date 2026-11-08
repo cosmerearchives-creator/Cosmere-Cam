@@ -16,7 +16,10 @@ def expand(words):
     return result, positions
 
 
-def match_progress(script, recent, cursor):
+def match_progress(script, recent, cursor, aliases=None):
+    if aliases:
+        from pronunciations import rewrite_tokens
+        recent=rewrite_tokens(recent,aliases,script)
     if not recent or not script:
         return cursor
     start = max(0, cursor-8)

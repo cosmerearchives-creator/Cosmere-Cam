@@ -41,6 +41,12 @@ def run():
                     pass
             threading.Thread(target=brand_shortcut, daemon=True).start()
         if smoke:
+            import vst3_isolation
+            vst3_host=vst3_isolation.Host()
+            try:
+                if not vst3_host.request(('self_test',),8)['gain_ok']:raise RuntimeError('Separate VST3 backend self-test failed')
+            finally:vst3_host.close()
+            if 'pedalboard' in sys.modules:raise RuntimeError('GPL VST3 backend was imported into GUI process')
             plugin_folder = os.environ.get('COSMERE_REAPLUGS_TEST_DIR')
             if plugin_folder:
                 import vst2_host
@@ -148,7 +154,7 @@ def run():
             report = os.environ.get('COSMERE_SMOKE_REPORT')
             if report:
                 atomic_json(report, {'version': VERSION, 'qt': True, 'ffmpeg': bool(resolve_ffmpeg()),
-                                     'discard': True, 'save': True, 'approved_export':True, 'editable_capture':True, 'reader_size': window.reader.font_size_control.value()})
+                                     'discard': True, 'save': True, 'approved_export':True, 'editable_capture':True,'vst3_helper':True, 'reader_size': window.reader.font_size_control.value()})
             # Avoid mutating user settings or triggering save prompts in CI.
             application.quit()
         if root and token and len(token) == 32 and token.isalnum():

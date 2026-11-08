@@ -51,6 +51,24 @@ class PluginDeadlines(unittest.TestCase):
             host.process.kill.assert_called_once()
         finally:release.set();worker.join(1)
 
+class CompactTransport(unittest.TestCase):
+    def test_half_size_transport_keeps_mask_bytes_separate_from_color(self):
+        import numpy as np
+        from capture_planes import planes
+        colors=[]
+        for color in ('red','green','blue'):
+            image=QImage(16,16,QImage.Format.Format_ARGB32_Premultiplied);image.fill(QColor(color));colors.append(image)
+        alpha=np.arange(256,dtype=np.uint8).reshape(16,16)
+        pixels=np.frombuffer(colors[2].bits(),dtype=np.uint8).reshape(16,16,4)
+        pixels[:,:,:3]=0;pixels[:,:,3]=alpha
+        payload=b''.join(planes(colors));size=256
+        self.assertEqual(len(payload),size*6) # Previously twelve bytes per pixel.
+        self.assertEqual(payload[3*size:4*size],alpha.tobytes())
+        self.assertEqual(payload[4*size+3*size//4:4*size+size],bytes([128])*(size//4))
+        self.assertEqual(payload[-size//4:],bytes([128])*(size//4))
+        self.assertTrue(all(value==82 for value in payload[:size])) # Limited-range BT.601 red.
+        self.assertEqual(pixels[:,:,3].tobytes(),alpha.tobytes())
+
 class Recovery(unittest.TestCase):
     def test_preparation_failure_retains_closed_audio_and_video(self):
         with tempfile.TemporaryDirectory() as folder:

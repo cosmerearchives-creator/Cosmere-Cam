@@ -55,12 +55,14 @@ class PluginController(QObject):
             window._refresh_vst3_status()
 
     def prepare_chain(self):
-        entries = [e for e in self.window._audio_chain_snapshot() if e['type'] == 'vst2']
+        all_entries=[e for e in self.window._audio_chain_snapshot() if e['type']=='vst2']
+        entries=[e for e in all_entries if e.get('enabled',False)]
         if not entries and not vst2_host.has_hosts():
             return
         def work():
+            saved=vst2_host.capture_active(all_entries)
+            snapshots={e['instance_id']:saved[e['instance_id']] for e in all_entries if not e.get('enabled',False) and e['instance_id'] in saved}
             vst2_host.reconcile(entries)
-            snapshots = {}
             failures = []
             for entry in entries:
                 try:
@@ -85,7 +87,7 @@ class PluginController(QObject):
                 for row in range(self.window.audio_chain.count()):
                     item = self.window.audio_chain.item(row)
                     entry = item.data(Qt.ItemDataRole.UserRole)
-                    if entry['type'] == 'vst2' and entry['instance_id'] not in snapshots:
+                    if entry['type'] == 'vst2' and entry.get('enabled',False) and entry['instance_id'] not in snapshots:
                         item.setCheckState(Qt.CheckState.Unchecked)
         self.job(work, ready)
 

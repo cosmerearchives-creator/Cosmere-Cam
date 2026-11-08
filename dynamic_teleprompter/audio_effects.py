@@ -16,11 +16,9 @@ _plugin_errors = {}
 _error_lock = threading.Lock()
 
 def vst3_backend_available():
-    try:
-        import pedalboard
-        return True
-    except ImportError:
-        return False
+    from vst3_isolation import available
+    return available()
+
 
 def plugin_errors():
     with _error_lock:

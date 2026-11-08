@@ -43,6 +43,8 @@ jobs:
           python -m unittest discover -s tests -v
       - name: Verify text editing, processing, timing review and canvas responsiveness
         run: python tools/verify_development.py
+      - name: Verify native Windows display ownership
+        run: python tools/verify_owned_windows.py
       - name: Build real Windows application and installer
         run: |
           python tools/build_windows.py
@@ -102,7 +104,7 @@ jobs:
               exit 0
             }
           }
-          gh release create $tag dist/Cosmere-Video-Recording-Suite-Setup.exe dist/Cosmere-Cam-Windows-x64.zip dist/update-manifest.json dist/*-source.zip dist/requirements-resolved.txt dist/windows-verification.json dist/reaplugs-verification.json dist/development-verification.json --target "$env:GITHUB_SHA" --title "Cosmere Video Recording Suite $tag" --notes-file dist/release-notes.md --draft --prerelease
+          gh release create $tag dist/Cosmere-Video-Recording-Suite-Setup.exe dist/Cosmere-Cam-Windows-x64.zip dist/update-manifest.json dist/*-source.zip dist/requirements-resolved.txt dist/windows-verification.json dist/reaplugs-verification.json dist/development-verification.json dist/windows-owner-verification.json --target "$env:GITHUB_SHA" --title "Cosmere Video Recording Suite $tag" --notes-file dist/release-notes.md --draft
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           "created=true" >> $env:GITHUB_OUTPUT
       - name: Verify uploaded asset hashes before publishing

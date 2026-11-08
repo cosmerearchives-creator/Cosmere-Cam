@@ -131,6 +131,9 @@ def propose_retakes(script,recognized):
 
 
 def run_media(command,cancel=None):
+    from processing_session import current
+    session=current()
+    if session is not None:return session.run(command,cancel=cancel,duration=getattr(session,'duration',None))
     process=subprocess.Popen([str(x) for x in command],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
         creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
     try:
@@ -161,14 +164,28 @@ def publish_file(source,destination):
     finally:Path(stage).unlink(missing_ok=True)
 
 
+def keep_filter(segments,audio=True):
+    """One video pass avoids full-resolution buffering across N concat branches."""
+    import math
+    if not segments:raise ValueError('No retained recording sections.')
+    previous=0.
+    for start,end in segments:
+        if not math.isfinite(start+end) or start<previous or end<=start:raise ValueError('Invalid trim sections.')
+        previous=end
+    select='+'.join(f'gte(t,{a:.9f})*lt(t,{b:.9f})' for a,b in segments)
+    gaps=[f'gte(T,{segments[i][0]:.9f})*{segments[i][0]-segments[i-1][1]:.9f}' for i in range(1,len(segments))]
+    offset='+'.join(gaps) or '0'
+    filters=[f"[0:v]select='{select}',setpts='PTS-STARTPTS-({offset})/TB'[v]"]
+    if audio:
+        for i,(a,b) in enumerate(segments):filters.append(f'[0:a]atrim=start={a:.9f}:end={b:.9f},asetpts=PTS-STARTPTS[a{i}]')
+        filters.append(''.join(f'[a{i}]' for i in range(len(segments)))+f'concat=n={len(segments)}:v=0:a=1[a]')
+    return ';'.join(filters)
+
+
 def cut_media(source,target,segments,ffmpeg,directory,*,audio=True,alpha=False,premultiplied=False,cancel=None):
-    filters=[]
-    for index,(start,end) in enumerate(segments):
-        filters.append(f'[0:v]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS[v{index}]')
-        if audio:filters.append(f'[0:a]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS[a{index}]')
-    inputs=''.join(f'[v{i}]'+(f'[a{i}]' if audio else '') for i in range(len(segments)))
-    filters.append(inputs+f'concat=n={len(segments)}:v=1:a={int(audio)}[v]'+('[a]' if audio else ''))
-    graph=Path(directory)/('cut-'+Path(target).stem+'.ffscript');graph.write_text(';'.join(filters),encoding='utf-8')
+    from processing_session import current
+    if current():current().duration=sum(b-a for a,b in segments)
+    graph=Path(directory)/('cut-'+Path(target).stem+'.ffscript');graph.write_text(keep_filter(segments,audio),encoding='utf-8')
     from recorder import supports_alpha_conversion
     tagged=alpha and premultiplied and supports_alpha_conversion(ffmpeg)
     command=[ffmpeg,'-y','-v','error']+(['-alpha_mode','premultiplied'] if tagged else [])+['-i',str(source),'-/filter_complex',str(graph),'-map','[v]']
