@@ -148,9 +148,9 @@ class RealProcessing(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);diagnostics=root/'take.diagnostics.json';diagnostics.write_text(json.dumps(dict(capture_calls=42)))
             analysis=ProcessingSession(root/'processing');analysis.report['diagnostics_path']=str(diagnostics)
-            analysis.begin('Matching recorded speech');time.sleep(.01);analysis.finish('review')
+            analysis.begin('Matching recorded speech');time.sleep(.04);analysis.finish('review')
             active_before=analysis.report['active_processing_seconds'];time.sleep(.02)
-            export=ProcessingSession(root/'processing');export.begin_export();export.begin('Exporting baseline');time.sleep(.01);export.finish('complete')
+            export=ProcessingSession(root/'processing');export.begin_export();export.begin('Exporting baseline');time.sleep(.04);export.finish('complete')
             report=json.loads(diagnostics.read_text())
             self.assertEqual(report['capture_calls'],42);self.assertGreater(report['post_processing']['review_wait_seconds'],.01)
             self.assertGreater(report['post_processing']['active_processing_seconds'],active_before)
