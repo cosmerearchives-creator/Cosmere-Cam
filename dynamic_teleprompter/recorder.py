@@ -108,6 +108,8 @@ class CanvasRecorder:
         self.capture_total_ms = 0.0
         self.capture_max_ms = 0.0
         self.encoder_writes = 0
+        self.encoded_unique_frames=0
+        self.queue_batches_coalesced=0
         self.encoder_write_total_ms = 0.0
         self.encoder_write_max_ms = 0.0
         self.peak_queue_depth = 0
@@ -155,10 +157,10 @@ class CanvasRecorder:
         if self.packed:
             self._silent=Path(self._temp.name)/'packed.mkv'
             self._packed_source=self._silent
-            command=[ffmpeg,'-y','-hide_banner','-loglevel','error','-filter_complex_threads','2','-f','rawvideo','-pixel_format','bgra',
+            command=[ffmpeg,'-y','-hide_banner','-loglevel','error','-filter_complex_threads','1','-f','rawvideo','-pixel_format','bgra',
                      '-probesize','32','-analyzeduration','0','-video_size',f'{self.width}x{self.height*3}','-framerate',str(self.fps),'-i','pipe:0',
                      '-filter_complex',f'[0:v]split=2[color][mask];[mask]crop={self.width}:{self.height}:0:{self.height*2},alphaextract[alpha]',
-                     '-map','[color]','-c:v:0','libx264','-preset:v:0','ultrafast','-crf:v:0','18','-pix_fmt:v:0','yuv420p','-threads:v:0','4','-tune:v:0','zerolatency',
+                     '-map','[color]','-c:v:0','libx264','-preset:v:0','ultrafast','-crf:v:0','23','-pix_fmt:v:0','yuv420p','-threads:v:0','2','-tune:v:0','zerolatency',
                      '-map','[alpha]','-c:v:1','libx264','-preset:v:1','ultrafast','-tune:v:1','zerolatency','-qp:v:1','0','-pix_fmt:v:1','gray','-color_range:v:1','pc','-threads:v:1','1',str(self._silent)]
             for name,alpha in [('background.mp4',False),('foreground.mov',True)]:
                 track=SimpleNamespace(path=Path(self._temp.name)/name,alpha=alpha,frame_count=0,error=None,finished=False,
@@ -252,8 +254,22 @@ class CanvasRecorder:
             packet=SimpleNamespace(pixels=data,previous=self._last_bytes,count=due)
             try:self._frames.put_nowait(packet)
             except queue.Full:
-                self.error='Video encoder cannot keep up; stopped instead of producing a shortened recording.'
-                return
+                if self.frame_count-self.encoder_writes+due>self.fps*2:
+                    self.error='Video encoder remained over two seconds behind; recording stopped with recovery.'
+                    return
+                # Coalesce the oldest timing span, retaining its first image and
+                # the next span's latest image. Memory stays bounded; time is not cut.
+                with self._frames.mutex:
+                    if len(self._frames.queue)>=self._frames.maxsize:
+                        old=self._frames.queue.popleft()
+                        following=self._frames.queue[0]
+                        following.count+=old.count
+                        following.previous=old.previous if old.count>1 and old.previous is not None else old.pixels
+                        self.queue_batches_coalesced+=1
+                        self._frames.unfinished_tasks-=1
+                    self._frames.queue.append(packet)
+                    self._frames.unfinished_tasks+=1
+                    self._frames.not_empty.notify()
             self.frame_count+=due
             self.peak_queue_depth=max(self.peak_queue_depth,self._frames.qsize())
         self._last_bytes = data
@@ -262,6 +278,7 @@ class CanvasRecorder:
 
     def _write_frames(self):
         try:
+            last_written_key=None
             while not self.cancelled:
                 packet=self._frames.get()
                 if packet is None:break
@@ -280,6 +297,9 @@ class CanvasRecorder:
                         self._video.stdin.write(native.constBits())
                     elapsed=(time.perf_counter()-started)*1000
                     self._encoder_pending_since=0.
+                    key=tuple(plane.cacheKey() for plane in pixels) if isinstance(pixels,tuple) else pixels.cacheKey()
+                    if key!=last_written_key:self.encoded_unique_frames+=1
+                    last_written_key=key
                     self.encoder_writes+=1
                     self.encoder_write_total_ms+=elapsed
                     self.encoder_write_max_ms=max(self.encoder_write_max_ms,elapsed)
@@ -372,10 +392,13 @@ class CanvasRecorder:
             'worker_stalls':self.worker_stalls,
             'capture_bytes':getattr(self,'capture_bytes',None),
             'encoded_frames': self.frame_count, 'late_frames': self.late_frames,
-            'duplicated_frames': self.duplicate_frames,
+            'duplicated_frames': max(self.duplicate_frames,self.frame_count-self.encoded_unique_frames),
             'capture_calls': self.capture_calls,
+            'encoded_unique_frames':self.encoded_unique_frames,
+            'fresh_encoded_fps':round(self.encoded_unique_frames/elapsed,2) if elapsed else 0,
+            'queue_batches_coalesced':self.queue_batches_coalesced,
             'fresh_capture_fps':round(self.capture_calls/elapsed,2) if elapsed else 0,
-            'duplicate_frame_percent':round(100*self.duplicate_frames/max(1,self.frame_count),2),
+            'duplicate_frame_percent':round(100*max(self.duplicate_frames,self.frame_count-self.encoded_unique_frames)/max(1,self.frame_count),2),
             'canvas_stage_mean_ms':{key:round(value/max(1,self.capture_calls),2) for key,value in self.capture_stage_totals.items()},
             'editable_capture_mode':'compressed_video_lossless_alpha' if self.packed else 'standard',
             'editable_tracks':[dict(alpha=track.alpha,frames=track.frame_count,error=track.error) for track in self.companions],
@@ -555,7 +578,7 @@ class CanvasRecorder:
                     from update_core import atomic_json
                     atomic_json(recovery.with_suffix('.json'),dict(width=self.width,height=self.height,fps=self.fps,
                         planes=['captured','background','foreground'],color_stream=0,alpha_stream=1,
-                        color_codec='h264_yuv420p_crf18',premultiplied=True,error=self.error))
+                        color_codec='h264_yuv420p_crf23',premultiplied=True,error=self.error))
                     if self._wave.exists() and not getattr(self,'_retain_live_audio',False):
                         audio_recovery=self.path.with_suffix('.recovery.wav')
                         from edit_pipeline import publish_file
