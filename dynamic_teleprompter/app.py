@@ -28,7 +28,7 @@ from audio_diagnostics import snapshot as audio_diagnostics_snapshot, reset as r
 from audio_effects import DEFAULT_CHAIN, normalize_chain, EFFECT_NAMES, vst3_backend_available, plugin_errors, inspect_vst3_parameters
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, Signal, QThread, QEvent, QPoint, QSettings, QSize
-from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut, QTextCursor, QTextCharFormat, QSyntaxHighlighter, QPainter, QPainterPath, QPen, QTextDocument, QIcon, QPixmap, QImage, QTransform
+from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut, QTextCursor, QTextCharFormat, QSyntaxHighlighter, QPainter, QPainterPath, QPen, QTextDocument, QIcon, QPixmap, QImage, QTransform, QRegion
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox,
     QFileDialog, QFontComboBox, QFormLayout, QGridLayout, QGroupBox,
@@ -1700,7 +1700,7 @@ class OutputWindow(QWidget):
                         text.fill(Qt.GlobalColor.transparent)
                         tp = QPainter(text)
                         for label in labels:
-                            label.render(tp, label.pos())
+                            label.render(tp,label.pos(),QRegion(),QWidget.RenderFlag.DrawChildren)
                         tp.end()
                         self._text_pixmap, self._text_key = text, key
                     self._text_was_animated = animated
