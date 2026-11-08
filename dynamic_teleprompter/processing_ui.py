@@ -287,8 +287,8 @@ class PreviewWorker(QThread):
     def run(self):
         try:
             from edit_pipeline import preview_join
-            from recorder import resolve_ffmpeg
-            target=preview_join(self.data,self.cut,resolve_ffmpeg(),self.directory,self.cancel)
+            from recorder import resolve_processing_ffmpeg
+            target=preview_join(self.data,self.cut,resolve_processing_ffmpeg(),self.directory,self.cancel)
             self.done.emit(str(target))
         except Exception as error:self.failed.emit(str(error))
 

@@ -74,7 +74,9 @@ def run():
             # Exercise actual frozen FFmpeg capture and discard without devices.
             import tempfile
             import time
-            from recorder import CanvasRecorder, resolve_ffmpeg
+            from recorder import CanvasRecorder, resolve_ffmpeg, bundled_ffmpeg, resolve_processing_ffmpeg
+            if not bundled_ffmpeg() or resolve_processing_ffmpeg("missing-custom.exe")!=bundled_ffmpeg():
+                raise RuntimeError("Frozen processing did not select the bundled encoder")
             from PySide6.QtGui import QImage
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / 'smoke.mp4'
@@ -101,6 +103,8 @@ def run():
                     time.sleep(.05)
                 if not recorder.finished or recorder.error or not saved.is_file():
                     raise RuntimeError('Frozen recording save failed: ' + str(recorder.error))
+                if recorder.diagnostic_report()["processing_ffmpeg"]!=bundled_ffmpeg():
+                    raise RuntimeError("Frozen recording finalization used an external encoder")
                 import subprocess
                 subprocess.run([resolve_ffmpeg(), '-v', 'error', '-i', str(saved), '-f', 'null', '-'],
                                check=True, capture_output=True, timeout=10)
@@ -154,7 +158,7 @@ def run():
             report = os.environ.get('COSMERE_SMOKE_REPORT')
             if report:
                 atomic_json(report, {'version': VERSION, 'qt': True, 'ffmpeg': bool(resolve_ffmpeg()),
-                                     'discard': True, 'save': True, 'approved_export':True, 'editable_capture':True,'vst3_helper':True, 'reader_size': window.reader.font_size_control.value()})
+                                     'discard': True, 'save': True, 'approved_export':True, 'editable_capture':True,'vst3_helper':True,'processing_uses_bundled_ffmpeg':True, 'reader_size': window.reader.font_size_control.value()})
             # Avoid mutating user settings or triggering save prompts in CI.
             application.quit()
         if root and token and len(token) == 32 and token.isalnum():

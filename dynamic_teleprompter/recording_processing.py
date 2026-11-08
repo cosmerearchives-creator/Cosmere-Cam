@@ -174,7 +174,7 @@ def process_recording(source, ffmpeg, options, script, model_path, duration, dir
             target = Path(directory) / 'trimmed.mp4'
             run([ffmpeg, '-y', '-hide_banner', '-loglevel', 'error', '-i', str(current),
                 '-/filter_complex', str(graph), '-map', '[v]', '-map', '[a]',
-                '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-c:a', 'aac',
+                '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-threads:v', '4', '-c:a', 'aac',
                 '-movflags', '+faststart', str(target)])
             current = target
             duration = sum(b-a for a,b in segments)

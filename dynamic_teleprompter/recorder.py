@@ -37,6 +37,22 @@ def resolve_ffmpeg(configured=''):
     return result
 
 
+def bundled_ffmpeg():
+    """Find the shipped binary directly, without PATH/environment overrides."""
+    try:
+        import imageio_ffmpeg
+        folder=Path(imageio_ffmpeg.__file__).resolve().parent/'binaries'
+        candidates=sorted(folder.glob('ffmpeg-*'),reverse=True)
+        return next((str(path) for path in candidates if path.is_file() and
+            (path.suffix.lower()=='.exe' if os.name=='nt' else os.access(path,os.X_OK))),None)
+    except (ImportError,OSError,TypeError):return None
+
+
+def resolve_processing_ffmpeg(configured=''):
+    """Processing uses the release-tested build; capture retains its custom path."""
+    return bundled_ffmpeg() or resolve_ffmpeg(configured)
+
+
 def _locate_ffmpeg(configured=''):
     app_dir=Path(__file__).resolve().parent
     candidates=[configured,Path(sys.executable).parent/'ffmpeg.exe',app_dir/'ffmpeg.exe',app_dir/'ffmpeg',
@@ -132,6 +148,7 @@ class CanvasRecorder:
     def start(self):
         ffmpeg = resolve_ffmpeg(self.ffmpeg_path)
         self._ffmpeg = ffmpeg
+        self._capture_ffmpeg = ffmpeg
         if not ffmpeg:
             raise RuntimeError('FFmpeg not found. Open Settings â†’ FFmpeg Location to select ffmpeg.exe, or put it beside app.py.')
         if self.microphone:
@@ -381,6 +398,8 @@ class CanvasRecorder:
         audio_seconds = self.audio_samples / self._audio_rate if self.microphone and hasattr(self, '_audio_rate') else None
         return {
             'app_release': __import__('version').VERSION, 'output': self.path.name,
+            'capture_ffmpeg':getattr(self,'_capture_ffmpeg',None),
+            'processing_ffmpeg':getattr(self,'_processing_ffmpeg',None),
             'resolution': [self.width, self.height], 'target_fps': self.fps,
             'wall_clock_seconds': round(elapsed, 3),
             'video_duration_seconds': round(self.frame_count / self.fps, 3),
@@ -433,6 +452,10 @@ class CanvasRecorder:
             def update(state):
                 self.processing_progress=state;self.processing_stage=state['stage']
             self.processing_session=ProcessingSession(self.path.with_suffix('.processing'),update)
+            self._processing_ffmpeg=resolve_processing_ffmpeg(self._ffmpeg)
+            if not self._processing_ffmpeg:raise RuntimeError('FFmpeg is unavailable for processing; original source retained.')
+            self.processing_session.report['ffmpeg_selection']=dict(policy='prefer_bundled',capture=getattr(self,'_capture_ffmpeg',self._ffmpeg),processing=self._processing_ffmpeg,bundled=self._processing_ffmpeg==bundled_ffmpeg())
+            self._ffmpeg=self._processing_ffmpeg
             self.processing_session.duration=self.frame_count/self.fps
             self.processing_session.report['diagnostics_path']=str(self.report_path)
             self.processing_session.report['process_choice_wait_seconds']=max(0,time.monotonic()-getattr(self,'_stopped',time.monotonic()))
