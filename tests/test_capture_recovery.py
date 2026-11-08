@@ -8,6 +8,21 @@ from PySide6.QtGui import QImage,QColor
 from recorder import CanvasRecorder
 from vst2_host import Host
 
+class FfmpegDiscovery(unittest.TestCase):
+    def test_successful_lookup_is_cached_by_configured_path(self):
+        import recorder
+        with patch.dict(recorder._ffmpeg_paths,{},clear=True),patch('recorder._locate_ffmpeg',side_effect=['first.exe','second.exe']) as locate:
+            self.assertEqual(recorder.resolve_ffmpeg('first'),'first.exe')
+            self.assertEqual(recorder.resolve_ffmpeg('first'),'first.exe')
+            self.assertEqual(recorder.resolve_ffmpeg('second'),'second.exe')
+            self.assertEqual(locate.call_count,2)
+    def test_explicit_executable_does_not_scan_path(self):
+        import recorder
+        with tempfile.TemporaryDirectory() as folder:
+            executable=Path(folder)/'ffmpeg.exe';executable.write_bytes(b'fixture')
+            with patch('recorder.shutil.which',side_effect=AssertionError('unexpected PATH scan')):
+                self.assertEqual(recorder.resolve_ffmpeg(str(executable)),str(executable.resolve()))
+
 class PluginDeadlines(unittest.TestCase):
     def host(self):
         host=Host.__new__(Host)

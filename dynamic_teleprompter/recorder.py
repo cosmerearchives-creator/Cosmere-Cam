@@ -24,21 +24,31 @@ from audio_effects import process_chain, normalize_chain, DEFAULT_CHAIN
 from audio_diagnostics import snapshot as audio_diagnostics_snapshot
 
 
+_ffmpeg_paths={}
+
 def resolve_ffmpeg(configured=''):
-    """Locate FFmpeg: explicitly configured executable, next to app, bin/, then PATH."""
-    app_dir = Path(__file__).resolve().parent
-    candidates = [configured, Path(sys.executable).parent / 'ffmpeg.exe', app_dir / 'ffmpeg.exe', app_dir / 'ffmpeg',
-                  app_dir / 'bin' / 'ffmpeg.exe', app_dir / 'bin' / 'ffmpeg',
-                  shutil.which('ffmpeg')]
+    """Resolve once per configured location, never scan PATH during every frame."""
+    key=str(configured or '')
+    if key in _ffmpeg_paths:return _ffmpeg_paths[key]
+    result=_locate_ffmpeg(key)
+    if result:
+        _ffmpeg_paths[key]=result
+        while len(_ffmpeg_paths)>16:_ffmpeg_paths.pop(next(iter(_ffmpeg_paths)))
+    return result
+
+
+def _locate_ffmpeg(configured=''):
+    app_dir=Path(__file__).resolve().parent
+    candidates=[configured,Path(sys.executable).parent/'ffmpeg.exe',app_dir/'ffmpeg.exe',app_dir/'ffmpeg',
+                app_dir/'bin'/'ffmpeg.exe',app_dir/'bin'/'ffmpeg']
     for candidate in candidates:
-        if candidate and Path(candidate).is_file():
-            return str(Path(candidate).resolve())
+        if candidate and Path(candidate).is_file():return str(Path(candidate).resolve())
+    system=shutil.which('ffmpeg')
+    if system:return system
     try:
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
-    except (ImportError, RuntimeError):
-        pass
-    return None
+    except (ImportError,RuntimeError):return None
 
 
 @lru_cache(maxsize=8)
