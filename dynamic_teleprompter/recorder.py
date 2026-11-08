@@ -413,9 +413,10 @@ class CanvasRecorder:
             if self._writer.is_alive():
                 raise RuntimeError('Encoder frame writer timed out')
             self._video.stdin.close()
-            diagnostics = self._video.stderr.read().decode('utf-8', 'replace')
-            self._video.stderr.close()
-            code = self._video.wait(timeout=60)
+            self._video.stdin=None
+            _,errors=self._video.communicate(timeout=60)
+            diagnostics=errors.decode('utf-8','replace')
+            code=self._video.returncode
             if code != 0:
                 raise RuntimeError('FFmpeg video encoding failed: ' + diagnostics[-1500:])
             self.capture_bytes=self._silent.stat().st_size
@@ -529,6 +530,11 @@ class CanvasRecorder:
                 atomic_json(self.path.with_suffix('.alignment.json'), self.processing_result['alignment'])
         except Exception as exc:
             self.error = str(exc)
+            audio_worker=getattr(self,'_audio_worker',None)
+            if audio_worker is not None and audio_worker.is_alive():self._retain_live_audio=True
+            elif hasattr(self,'_audio_file'):
+                try:self._audio_file.close()
+                except OSError:pass
             # Release a blocked encoder pipe before attempting recovery/cleanup.
             if self._video is not None and self._video.poll() is None:
                 self._video.kill()
@@ -575,7 +581,11 @@ class CanvasRecorder:
                 if getattr(self,'_retain_live_audio',False):
                     self.error+='; audio workspace retained at '+self._temp.name
                     self._temp._finalizer.detach()
-                else:self._temp.cleanup()
+                else:
+                    try:self._temp.cleanup()
+                    except OSError as cleanup_error:
+                        self._temp._finalizer.detach()
+                        self.error=(self.error or '')+'; workspace retained: '+str(cleanup_error)
             self.finished = True
 
     def abort(self):
