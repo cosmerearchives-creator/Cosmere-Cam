@@ -8,8 +8,7 @@ from pathlib import Path
 
 def align_script(script, recognized, duration):
     tokens = re.findall(r"\S+", script)
-    def normalized(word):
-        return re.sub(r"[^\w']", '', word.casefold())
+    from edit_pipeline import normalize_word as normalized
     words = [dict(word=word, start=None, end=None, status='Estimated timing—needs approval',
                   needs_approval=True) for word in tokens]
     heard = [item for item in recognized if normalized(item.get('word', ''))]
@@ -89,9 +88,38 @@ def run(command, **kwargs):
         raise RuntimeError('Recording processing failed: ' + detail[-2000:]) from exc
 
 
+def recognize_words(source,ffmpeg,model_path,directory):
+    from vosk import Model, KaldiRecognizer, SetLogLevel
+    import wave
+    audio = Path(directory) / 'alignment.wav'
+    run([ffmpeg, '-y', '-hide_banner', '-loglevel', 'error', '-i', str(source),
+         '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(audio)])
+    SetLogLevel(-1)
+    recognizer = KaldiRecognizer(Model(str(model_path)), 16000)
+    recognizer.SetWords(True)
+    recognized = []
+    with wave.open(str(audio), 'rb') as stream:
+        while True:
+            block = stream.readframes(8000)
+            if not block:
+                break
+            if recognizer.AcceptWaveform(block):
+                recognized.extend(json.loads(recognizer.Result()).get('result', []))
+    recognized.extend(json.loads(recognizer.FinalResult()).get('result', []))
+    return recognized
+
+
 def process_recording(source, ffmpeg, options, script, model_path, duration, directory, progress):
     result = dict(options=options, trim_segments=[(0., duration)])
     current = Path(source)
+    original_duration=duration
+    original_recognized=[];original_cuts=[]
+    if options.get('align'):
+        progress('Analyzing speech and restarts before trimming…')
+        original_recognized=recognize_words(current,ffmpeg,model_path,directory)
+        if options.get('advanced','off')!='off':
+            from edit_pipeline import propose_retakes
+            original_cuts=propose_retakes(script,original_recognized)
     trim = options.get('trim', 'none')
     if trim != 'none':
         progress('Detecting silence…')
@@ -132,31 +160,23 @@ def process_recording(source, ffmpeg, options, script, model_path, duration, dir
             current = target
             duration = sum(b-a for a,b in segments)
     if options.get('align'):
-        progress('Matching the full script to recorded speech…')
-        from vosk import Model, KaldiRecognizer, SetLogLevel
-        import wave
-        audio = Path(directory) / 'alignment.wav'
-        run([ffmpeg, '-y', '-hide_banner', '-loglevel', 'error', '-i', str(current),
-             '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(audio)])
-        SetLogLevel(-1)
-        recognizer = KaldiRecognizer(Model(str(model_path)), 16000)
-        recognizer.SetWords(True)
-        recognized = []
-        with wave.open(str(audio), 'rb') as stream:
-            while True:
-                block = stream.readframes(8000)
-                if not block:
-                    break
-                if recognizer.AcceptWaveform(block):
-                    recognized.extend(json.loads(recognizer.Result()).get('result', []))
-        recognized.extend(json.loads(recognizer.FinalResult()).get('result', []))
-        from edit_pipeline import propose_retakes
-        cuts=propose_retakes(script,recognized) if options.get('advanced','off')!='off' else []
+        from edit_pipeline import map_time
+        segments=result['trim_segments']
+        recognized=[]
+        for item in original_recognized:
+            word=dict(item,start=map_time(float(item['start']),segments),end=map_time(float(item['end']),segments))
+            if word['end']>word['start']:recognized.append(word)
+        cuts=[]
+        for item in original_cuts:
+            cut=dict(item,start=map_time(item['start'],segments),end=map_time(item['end'],segments),
+                     original_start=item['start'],original_end=item['end'])
+            if cut['end']>cut['start']:
+                cut['approved']=options.get('advanced')=='automatic' and cut['confidence']>=.95
+                cuts.append(cut)
         preferred=[word for word in recognized if not any(cut['start']<=float(word['start'])<cut['end'] for cut in cuts)]
-        result['alignment'] = align_script(script, preferred, duration)
-        result['alignment']['recognized'] = recognized
-        result['alignment']['advanced_mode'] = options.get('advanced','off')
-        for cut in cuts:
-            cut['approved'] = options.get('advanced')=='automatic' and cut['confidence']>=.95
-        result['alignment']['cuts'] = cuts
-    return current, result
+        result['alignment']=align_script(script,preferred,duration)
+        result['alignment'].update(recognized=recognized,recognized_original=original_recognized,
+            advanced_mode=options.get('advanced','off'),cuts=cuts,retake_detection_timeline='before_basic_trimming',
+            original_duration=original_duration)
+        result['retake_proposals']=len(cuts)
+    return current,result

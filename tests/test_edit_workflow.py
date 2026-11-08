@@ -152,6 +152,8 @@ class RealEditableExport(unittest.TestCase):
                 pixels=[np.frombuffer(payload,dtype=np.uint8).reshape(240,320,3) for payload in frames];frames.close()
                 return pixels
             baseline=decode(data['exports']['baseline']);edited=decode(data['exports']['edited'])
+            self.assertEqual(len(decode(data['source']['scene'])),20)
+            self.assertEqual(len(decode(data['source']['foreground'])),20)
             self.assertGreater(len(baseline),len(edited))
             self.assertTrue(np.all(baseline[2][100,100]<[10,10,260])) # no red baked-in text/frame
             self.assertGreater(int(baseline[7][10,10,1]),200) # foreground alpha retained
@@ -186,6 +188,30 @@ class RealEditableExport(unittest.TestCase):
             self.assertIsNone(recorder.error)
             self.assertTrue(recorder.path.is_file())
             self.assertIn('Editable source',recorder.processing_error)
+    def test_failed_unpack_retains_recoverable_layered_capture(self):
+        from recorder import CanvasRecorder
+        with tempfile.TemporaryDirectory() as folder:
+            r=CanvasRecorder(Path(folder)/'failure.mp4',64,64,10,microphone=False,editable=True);r.start()
+            image=QImage(64,64,QImage.Format.Format_ARGB32_Premultiplied);image.fill(QColor('blue'))
+            r.push_frame(image,image,image)
+            with patch('edit_pipeline.run_media',side_effect=RuntimeError('simulated preparation failure')):
+                r.finish_async();deadline=time.monotonic()+20
+                while not r.finished and time.monotonic()<deadline:time.sleep(.01)
+            self.assertTrue(r.finished);self.assertIsNotNone(r.error)
+            self.assertTrue(r.path.with_suffix('.recovery.mov').is_file())
+            self.assertFalse(r.path.exists())
+    def test_transparent_capture_flattens_consistently(self):
+        from recorder import CanvasRecorder
+        import imageio_ffmpeg
+        with tempfile.TemporaryDirectory() as folder:
+            r=CanvasRecorder(Path(folder)/'transparent.mp4',64,64,10,microphone=False,editable=True);r.start()
+            image=QImage(64,64,QImage.Format.Format_ARGB32_Premultiplied);image.fill(QColor(255,0,0,128))
+            foreground=QImage(image.size(),image.format());foreground.fill(QColor(0,0,0,0))
+            r.push_frame(image,image,foreground);r.finish_async();deadline=time.monotonic()+20
+            while not r.finished and time.monotonic()<deadline:time.sleep(.01)
+            self.assertTrue(r.finished);self.assertIsNone(r.error)
+            reader=imageio_ffmpeg.read_frames(str(r.path),pix_fmt='rgb24');next(reader);pixel=next(reader)[:3];reader.close()
+            self.assertTrue(115<pixel[0]<140);self.assertLess(pixel[1],10);self.assertLess(pixel[2],10)
     def test_discard_editable_take_skips_processing_and_removes_tracks(self):
         from recorder import CanvasRecorder
         with tempfile.TemporaryDirectory() as folder:

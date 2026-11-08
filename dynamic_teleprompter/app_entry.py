@@ -98,6 +98,14 @@ def run():
                 import subprocess
                 subprocess.run([resolve_ffmpeg(), '-v', 'error', '-i', str(saved), '-f', 'null', '-'],
                                check=True, capture_output=True, timeout=10)
+                layered=CanvasRecorder(Path(directory)/'layered.mp4',64,64,30,microphone=False,editable=True)
+                layered.start()
+                layer_image=QImage(64,64,QImage.Format.Format_ARGB32_Premultiplied);layer_image.fill(0xff203040)
+                layered.push_frame(layer_image,layer_image,layer_image);layered.finish_async()
+                deadline=time.monotonic()+25
+                while not layered.finished and time.monotonic()<deadline:time.sleep(.02)
+                if not layered.finished or layered.error or not layered.path.is_file():
+                    raise RuntimeError('Frozen layered capture failed: '+str(layered.error))
                 # Exercise the packaged Qt caption renderer and FFmpeg export, not just source imports.
                 from edit_pipeline import run_media
                 from export_ui import ExportDialog
@@ -140,7 +148,7 @@ def run():
             report = os.environ.get('COSMERE_SMOKE_REPORT')
             if report:
                 atomic_json(report, {'version': VERSION, 'qt': True, 'ffmpeg': bool(resolve_ffmpeg()),
-                                     'discard': True, 'save': True, 'approved_export':True, 'reader_size': window.reader.font_size_control.value()})
+                                     'discard': True, 'save': True, 'approved_export':True, 'editable_capture':True, 'reader_size': window.reader.font_size_control.value()})
             # Avoid mutating user settings or triggering save prompts in CI.
             application.quit()
         if root and token and len(token) == 32 and token.isalnum():
