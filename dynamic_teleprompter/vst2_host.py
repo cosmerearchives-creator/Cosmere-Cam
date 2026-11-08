@@ -51,6 +51,9 @@ class Host:
             self.process.kill()
             self.process.wait(timeout=2)
             raise
+        self.requests = queue.Queue(maxsize=1)
+        self.writer = threading.Thread(target=self._write, daemon=True)
+        self.writer.start()
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
         try:
@@ -83,26 +86,39 @@ class Host:
             except queue.Full:
                 pass
 
+    def _write(self):
+        while self.process.poll() is None:
+            try:payload=self.requests.get(timeout=.1)
+            except queue.Empty:continue
+            try:
+                self.process.stdin.write(payload)
+                self.process.stdin.flush()
+            except (OSError,ValueError) as error:
+                try:self.replies.put_nowait(error)
+                except queue.Full:pass
+                return
+
     def request(self, operation, data=b'', timeout=2):
         if len(data) > MAX_PAYLOAD:
             raise ValueError('Plugin request is too large')
-        with self.lock:
+        deadline=time.monotonic()+timeout
+        acquired=self.lock.acquire(timeout=timeout)
+        try:
+            if not acquired:
+                raise queue.Empty()
             if self.process.poll() is not None:
                 raise RuntimeError('Plugin host is no longer running')
-            try:
-                self.process.stdin.write(struct.pack('<II', operation, len(data)) + data)
-                self.process.stdin.flush()
-                result = self.replies.get(timeout=timeout)
-                if isinstance(result, Exception):
-                    raise result
-                status, payload = result
-                if status:
-                    raise RuntimeError(payload.decode('utf-8', 'replace'))
-                return payload
-            except (queue.Empty, BrokenPipeError, OSError) as error:
-                # A stale reply cannot be mistaken for the next request.
-                self.process.kill()
-                raise RuntimeError('Plugin timed out or stopped responding; effect bypassed') from error
+            self.requests.put_nowait(struct.pack('<II',operation,len(data))+data)
+            result=self.replies.get(timeout=max(0.,deadline-time.monotonic()))
+            if isinstance(result,Exception):raise result
+            status,payload=result
+            if status:raise RuntimeError(payload.decode('utf-8','replace'))
+            return payload
+        except (queue.Empty,queue.Full,BrokenPipeError,OSError,ValueError) as error:
+            self.process.kill()
+            raise RuntimeError('Plugin timed out or stopped responding; effect bypassed') from error
+        finally:
+            if acquired:self.lock.release()
 
     def audio(self, data):
         samples = np.frombuffer(data, dtype='<i2').astype('<f4') / 32768.0
@@ -134,25 +150,28 @@ class Host:
         self.request(4, struct.pack('<If', index, value))
 
     def close(self):
-        with self.lock:
+        acquired=self.lock.acquire(timeout=.5)
+        try:
             try:
+                if not acquired:raise RuntimeError('Host busy during close')
                 if self.process.poll() is None:
-                    self.request(8, timeout=.5)
+                    self.request(8,timeout=.5)
                     self.process.wait(timeout=1)
             except Exception:
                 if self.process.poll() is None:
                     self.process.kill()
                     self.process.wait(timeout=2)
             finally:
-                for pipe in (self.process.stdin, self.process.stdout):
-                    if pipe:
-                        try:
-                            pipe.close()
-                        except OSError:
-                            pass
+                self.writer.join(timeout=1)
+                self.reader.join(timeout=1)
+                for pipe,worker in ((self.process.stdin,self.writer),(self.process.stdout,self.reader)):
+                    if pipe and not worker.is_alive():
+                        try:pipe.close()
+                        except OSError:pass
                 import windows_jobs
                 windows_jobs.release(self.job)
-                self.job = None
+        finally:
+            if acquired:self.lock.release()
 
 
 def instance_key(entry):

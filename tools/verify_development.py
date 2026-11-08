@@ -274,6 +274,8 @@ def main():
         if captures/elapsed<20:
             live.close_render_workers();app.VIDEO_FRAMES.shutdown()
         assert captures/elapsed>=20, captures/elapsed
+        results['editable_capture_mb_per_second']=round(editable.capture_bytes/elapsed/1_000_000,2)
+        assert editable.capture_bytes/elapsed<30_000_000, 'Editable capture disk rate regression'
         results['editable_portrait_capture_fps']=round(captures/elapsed,2)
         results['editable_foreground_heavy_layout']=True
         results['editable_tracks_frame_counts']=[editable.frame_count]+[track.frame_count for track in editable.companions]
