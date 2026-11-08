@@ -160,10 +160,10 @@ class CanvasRecorder:
         if self.packed:
             self._silent=Path(self._temp.name)/'packed.mkv'
             self._packed_source=self._silent
-            command=[ffmpeg,'-y','-hide_banner','-loglevel','error','-filter_complex_threads','1','-f','rawvideo','-pixel_format','bgra',
-                     '-probesize','32','-analyzeduration','0','-video_size',f'{self.width}x{self.height*3}','-framerate',str(self.fps),'-i','pipe:0',
-                     '-filter_complex',f'[0:v]split=2[color][mask];[mask]crop={self.width}:{self.height}:0:{self.height*2},alphaextract[alpha]',
-                     '-map','[color]','-c:v:0','libx264','-preset:v:0','ultrafast','-crf:v:0','23','-pix_fmt:v:0','yuv420p','-threads:v:0',str(min(4,max(1,(os.cpu_count() or 4)-1))),'-tune:v:0','zerolatency',
+            command=[ffmpeg,'-y','-hide_banner','-loglevel','error','-filter_complex_threads','1','-f','rawvideo','-pixel_format','yuv420p',
+                     '-probesize','32','-analyzeduration','0','-video_size',f'{self.width}x{self.height*4}','-framerate',str(self.fps),'-i','pipe:0',
+                     '-filter_complex',f'[0:v]split=2[color_source][mask];[color_source]crop={self.width}:{self.height*3}:0:0[color];[mask]crop={self.width}:{self.height}:0:{self.height*3},extractplanes=y,setparams=range=full[alpha]',
+                     '-map','[color]','-c:v:0','libx264','-preset:v:0','ultrafast','-crf:v:0','23','-pix_fmt:v:0','yuv420p','-threads:v:0','2','-tune:v:0','zerolatency',
                      '-map','[alpha]','-c:v:1','libx264','-preset:v:1','ultrafast','-tune:v:1','zerolatency','-qp:v:1','0','-pix_fmt:v:1','gray','-color_range:v:1','pc','-threads:v:1','1',str(self._silent)]
             for name,alpha in [('background.mp4',False),('foreground.mov',True)]:
                 track=SimpleNamespace(path=Path(self._temp.name)/name,alpha=alpha,frame_count=0,error=None,finished=False,
@@ -281,7 +281,7 @@ class CanvasRecorder:
 
     def _write_frames(self):
         try:
-            last_written_key=None
+            last_written_key=None;cached_key=None;cached_planes=None
             while not self.cancelled:
                 packet=self._frames.get()
                 if packet is None:break
@@ -291,9 +291,11 @@ class CanvasRecorder:
                     self._encoder_pending_since=time.monotonic()
                     started=time.perf_counter()
                     if isinstance(pixels,tuple):
-                        for plane in pixels:
-                            native=plane.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
-                            self._video.stdin.write(native.constBits())
+                        key=tuple(plane.cacheKey() for plane in pixels)
+                        if key!=cached_key:
+                            from capture_planes import planes
+                            cached_planes=planes(pixels);cached_key=key
+                        for part in cached_planes:self._video.stdin.write(part)
                     else:
                         pixel_format=QImage.Format.Format_ARGB32 if self.alpha and not self.alpha_conversion_offloaded else QImage.Format.Format_ARGB32_Premultiplied
                         native=pixels.convertToFormat(pixel_format)
