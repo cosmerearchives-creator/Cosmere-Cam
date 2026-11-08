@@ -252,7 +252,7 @@ def main():
         window.out.capture_editable=True
         editable=CanvasRecorder(temp/'editable-benchmark.mp4',1080,1920,30,microphone=False,editable=True)
         editable.start();window.out.capture_owner=editable;start=time.monotonic();captures=0;capture_costs=[]
-        while time.monotonic()-start<3.0:
+        while time.monotonic()-start<10.0:
             if editable.frames_due()>0:
                 tick=time.perf_counter()
                 window.out.render_frame(force=True)
@@ -262,6 +262,7 @@ def main():
                 captures+=1
             qt.processEvents();time.sleep(.002)
         elapsed=time.monotonic()-start
+        print("Capture queue:",editable.peak_queue_depth,"writes:",editable.encoder_writes,"mean write ms:",editable.encoder_write_total_ms/max(1,editable.encoder_writes),"error:",editable.error,flush=True)
         editable.finish_async()
         deadline=time.monotonic()+30
         while not editable.finished and time.monotonic()<deadline:

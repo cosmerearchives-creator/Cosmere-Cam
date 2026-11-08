@@ -142,7 +142,7 @@ class CanvasRecorder:
             self._silent=Path(self._temp.name)/'packed.mkv'
             self._packed_source=self._silent
             command=[ffmpeg,'-y','-hide_banner','-loglevel','error','-f','rawvideo','-pixel_format','bgra',
-                     '-video_size',f'{self.width}x{self.height*3}','-framerate',str(self.fps),'-i','pipe:0',
+                     '-probesize','32','-analyzeduration','0','-video_size',f'{self.width}x{self.height*3}','-framerate',str(self.fps),'-i','pipe:0',
                      '-an','-c:v','ffvhuff','-pix_fmt','bgra','-threads','4',str(self._silent)]
             for name,alpha in [('background.mp4',False),('foreground.mov',True)]:
                 track=SimpleNamespace(path=Path(self._temp.name)/name,alpha=alpha,frame_count=0,error=None,finished=False,
@@ -152,7 +152,7 @@ class CanvasRecorder:
                 self.companions.append(track)
         self._video = subprocess.Popen(command, stdin=subprocess.PIPE,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                       creationflags=(getattr(subprocess, 'CREATE_NO_WINDOW', 0) | getattr(subprocess,'BELOW_NORMAL_PRIORITY_CLASS',0)))
+                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         try:
             if self.microphone:
                 import sounddevice as sd
