@@ -39,7 +39,7 @@ class ProcessingSession:
             self._last_save=now;self.save()
     def begin(self,name):
         self.end_stage();self.stage=name;self.stage_started=time.monotonic()
-        self.update(stage=name,stalled=False)
+        self.update(stage=name,stalled=False,speed="",frame="")
     def end_stage(self):
         if self.stage is not None:
             self.report['stages'].append(dict(stage=self.stage,seconds=round(time.monotonic()-self.stage_started,3)))

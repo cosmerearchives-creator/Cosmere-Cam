@@ -1,5 +1,6 @@
 """Recording choices and review of complete-script word timings."""
 from pathlib import Path
+import time
 from PySide6.QtCore import Qt,QThread,Signal,QUrl,QTimer
 from PySide6.QtGui import QColor,QDesktopServices
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
@@ -22,6 +23,9 @@ class RecordingProgress(QDialog):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder if folder.is_dir() else folder.parent)))
     def refresh(self):
         state=dict(self.recorder.processing_progress);name=state.get('stage','Finalizing capture')
+        session=self.recorder.processing_session
+        if session is not None and not self.recorder.finished:
+            now=time.monotonic();state.update(elapsed_seconds=now-session.started,stage_seconds=now-session.stage_started)
         percent=state.get('percent')
         if percent is None:self.bar.setRange(0,0)
         else:self.bar.setRange(0,100);self.bar.setValue(round(percent))

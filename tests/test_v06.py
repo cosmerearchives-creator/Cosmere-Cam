@@ -89,6 +89,23 @@ class Vst3HelperBoundary(unittest.TestCase):
         self.assertEqual('pedalboard' in sys.modules,before)
 
 class UiPlanningFeatures(unittest.TestCase):
+    def test_elapsed_time_keeps_advancing_during_speech_analysis_without_percent(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from PySide6.QtWidgets import QApplication
+        from processing_session import ProcessingSession
+        from processing_ui import RecordingProgress
+        qt=QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as folder:
+            session=ProcessingSession(Path(folder)/'processing');session.update(50,speed='0.2x')
+            session.begin('Matching recorded speech')
+            self.assertEqual(session.state['speed'],'')
+            recorder=SimpleNamespace(path=Path(folder)/'take.mp4',processing_progress=dict(session.state),processing_session=session,finished=False)
+            dialog=RecordingProgress(None,recorder)
+            with patch('processing_ui.time.monotonic',return_value=session.started+9):dialog.refresh()
+            self.assertIn('Elapsed: 9s',dialog.details.text());self.assertEqual(dialog.bar.maximum(),0)
+            dialog.timer.stop();dialog.close();qt.processEvents()
+
     def test_owned_windows_and_contractions(self):
         from PySide6.QtWidgets import QApplication,QWidget,QTextEdit
         from app import Proofreader
