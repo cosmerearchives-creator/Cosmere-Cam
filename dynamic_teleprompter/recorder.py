@@ -139,11 +139,11 @@ class CanvasRecorder:
             command[index:index]=['-alpha_mode','premultiplied']
             command[-1:-1]=['-alpha_mode','premultiplied']
         if self.packed:
-            self._silent=Path(self._temp.name)/'packed.mov'
+            self._silent=Path(self._temp.name)/'packed.mkv'
             self._packed_source=self._silent
             command=[ffmpeg,'-y','-hide_banner','-loglevel','error','-f','rawvideo','-pixel_format','bgra',
                      '-video_size',f'{self.width}x{self.height*3}','-framerate',str(self.fps),'-i','pipe:0',
-                     '-an','-c:v','qtrle','-pix_fmt','argb','-threads','1',str(self._silent)]
+                     '-an','-c:v','ffvhuff','-pix_fmt','bgra','-threads','4',str(self._silent)]
             for name,alpha in [('background.mp4',False),('foreground.mov',True)]:
                 track=SimpleNamespace(path=Path(self._temp.name)/name,alpha=alpha,frame_count=0,error=None,finished=False,
                     alpha_conversion_offloaded=True,encoder_write_total_ms=0.,encoder_writes=0,peak_queue_depth=0)
@@ -492,7 +492,7 @@ class CanvasRecorder:
             # If analysis/source retention fails after capture encoding, recover the playable take.
             candidate=locals().get('ready')
             if candidate is None and self.packed and getattr(self,'_packed_source',Path('missing')).is_file():
-                recovery=self.path.with_suffix('.recovery.mov')
+                recovery=self.path.with_suffix('.recovery.mkv')
                 try:
                     try:os.replace(self._packed_source,recovery)
                     except OSError:

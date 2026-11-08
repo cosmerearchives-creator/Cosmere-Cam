@@ -198,7 +198,7 @@ class RealEditableExport(unittest.TestCase):
                 r.finish_async();deadline=time.monotonic()+20
                 while not r.finished and time.monotonic()<deadline:time.sleep(.01)
             self.assertTrue(r.finished);self.assertIsNotNone(r.error)
-            self.assertTrue(r.path.with_suffix('.recovery.mov').is_file())
+            self.assertTrue(r.path.with_suffix('.recovery.mkv').is_file())
             self.assertFalse(r.path.exists())
     def test_transparent_capture_flattens_consistently(self):
         from recorder import CanvasRecorder

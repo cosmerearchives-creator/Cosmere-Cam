@@ -266,6 +266,8 @@ def main():
         deadline=time.monotonic()+30
         while not editable.finished and time.monotonic()<deadline:
             qt.processEvents();time.sleep(.01)
+        if not editable.finished or editable.error:
+            live.close_render_workers();app.VIDEO_FRAMES.shutdown()
         assert editable.finished and not editable.error, editable.error
         print('Editable source capture profile:',captures/elapsed,'FPS; render/push ms',np.mean(capture_costs,axis=0),'CPU count',os.cpu_count(), 'canvas stages',window.out.render_stages,flush=True)
         if captures/elapsed<20:
