@@ -88,6 +88,10 @@ class CanvasRecorder:
         self._video = None
         self._audio = None
         self._stream = None
+        self.worker_stalls=[]
+        self._encoder_pending_since=0.
+        self._audio_pending_since=0.
+        self.audio_stage='idle'
         self._last_bytes = None
         self.capture_calls = 0
         self.capture_stage_totals={}
@@ -143,7 +147,9 @@ class CanvasRecorder:
             self._packed_source=self._silent
             command=[ffmpeg,'-y','-hide_banner','-loglevel','error','-f','rawvideo','-pixel_format','bgra',
                      '-probesize','32','-analyzeduration','0','-video_size',f'{self.width}x{self.height*3}','-framerate',str(self.fps),'-i','pipe:0',
-                     '-an','-c:v','ffvhuff','-pix_fmt','bgra','-threads','4',str(self._silent)]
+                     '-filter_complex',f'[0:v]split=2[color][mask];[mask]crop={self.width}:{self.height}:0:{self.height*2},alphaextract[alpha]',
+                     '-map','[color]','-c:v:0','libx264rgb','-preset:v:0','ultrafast','-crf:v:0','18','-pix_fmt:v:0','bgr0','-threads:v:0','2',
+                     '-map','[alpha]','-c:v:1','ffv1','-pix_fmt:v:1','gray','-threads:v:1','1',str(self._silent)]
             for name,alpha in [('background.mp4',False),('foreground.mov',True)]:
                 track=SimpleNamespace(path=Path(self._temp.name)/name,alpha=alpha,frame_count=0,error=None,finished=False,
                     alpha_conversion_offloaded=True,encoder_write_total_ms=0.,encoder_writes=0,peak_queue_depth=0)
@@ -163,7 +169,7 @@ class CanvasRecorder:
                 self._audio_file.setsampwidth(2)
                 self._audio_file.setframerate(self._audio_rate)
                 def callback(indata, frames, time_info, status):
-                    if self.cancelled:
+                    if self.cancelled or self.stopping:
                         return
                     self.audio_samples += frames
                     try:
@@ -181,6 +187,26 @@ class CanvasRecorder:
         self._started = time.monotonic()
         self._writer = threading.Thread(target=self._write_frames, daemon=True)
         self._writer.start()
+        self._watchdog=threading.Thread(target=self._watch_workers,name="Recording watchdog",daemon=True)
+        self._watchdog.start()
+
+    def _watch_workers(self):
+        import traceback
+        last_report=0.
+        while not self.finished and not self.cancelled:
+            time.sleep(.5)
+            now=time.monotonic()
+            if now-last_report<5:continue
+            waits={name:round(now-start,2) for name,start in [('encoder',self._encoder_pending_since),('audio',self._audio_pending_since)] if start and now-start>2}
+            if not waits:continue
+            frames=sys._current_frames()
+            snapshot=dict(waits=waits,audio_stage=self.audio_stage,threads={thread.name:''.join(traceback.format_stack(frames[thread.ident])) for thread in threading.enumerate() if thread.ident in frames})
+            self.worker_stalls=(self.worker_stalls+[snapshot])[-3:]
+            try:
+                from update_core import atomic_json
+                atomic_json(self.path.with_suffix('.stall.json'),dict(worker_stalls=self.worker_stalls))
+            except OSError:pass
+            last_report=now
 
     def elapsed(self):
         return getattr(self, '_stopped', time.monotonic()) - self._started
@@ -231,6 +257,7 @@ class CanvasRecorder:
                 pixels = self._frames.get()
                 if pixels is None:
                     break
+                self._encoder_pending_since=time.monotonic()
                 write_started = time.perf_counter()
                 if isinstance(pixels,tuple):
                     # Each plane occupies exactly one canvas-height of the packed frame.
@@ -250,6 +277,7 @@ class CanvasRecorder:
                     pixels=last_pixels
                 if pixels is not None:self._video.stdin.write(pixels)
                 elapsed_ms = (time.perf_counter() - write_started) * 1000
+                self._encoder_pending_since=0.
                 self.encoder_writes += 1
                 self.encoder_write_total_ms += elapsed_ms
                 self.encoder_write_max_ms = max(self.encoder_write_max_ms, elapsed_ms)
@@ -270,14 +298,21 @@ class CanvasRecorder:
             gate = bool(self.audio_gate_enabled)
             db = int(self.audio_gate_db)
             try:
+                self._audio_pending_since=time.monotonic()
+                self.audio_stage='microphone level'
                 if self.audio_level_listener is not None:
                     self.audio_level_listener(data)
+                self.audio_stage='effects'
                 data, peak = process_chain(data, self.audio_chain, gain, db, self.audio_clip_drive)
                 self.audio_peak = max(self.audio_peak, peak)
+                self.audio_stage='writing audio'
                 self._write_aligned_audio(data)
                 listener = self.audio_listener
                 if listener is not None:
+                    self.audio_stage='monitor'
                     listener(data)
+                self._audio_pending_since=0.
+                self.audio_stage='idle'
             except Exception as exc:
                 self.error = 'Audio processing failed: ' + str(exc)
                 break
@@ -303,14 +338,10 @@ class CanvasRecorder:
             self._audio_file.writeframesraw(data[skip * 2:])
 
     def pause_capture(self):
-        if self.stopping:
-            return
-        self._stopped = time.monotonic()
-        self.stopping = True
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+        if self.stopping:return
+        self._stopped=time.monotonic()
+        # Reject callbacks immediately; potentially slow device teardown runs in _finish.
+        self.stopping=True
 
     def finish_async(self):
         if self._finish_started or self.cancelled:
@@ -337,13 +368,15 @@ class CanvasRecorder:
             'audio_processed_peak': self.audio_peak,
             'audio_dropped_chunks': self.audio_dropped_chunks,
             'audio_dsp_timings': audio_diagnostics_snapshot(),
+            'worker_stalls':self.worker_stalls,
+            'capture_bytes':getattr(self,'capture_bytes',None),
             'encoded_frames': self.frame_count, 'late_frames': self.late_frames,
             'duplicated_frames': self.duplicate_frames,
             'capture_calls': self.capture_calls,
             'fresh_capture_fps':round(self.capture_calls/elapsed,2) if elapsed else 0,
             'duplicate_frame_percent':round(100*self.duplicate_frames/max(1,self.frame_count),2),
             'canvas_stage_mean_ms':{key:round(value/max(1,self.capture_calls),2) for key,value in self.capture_stage_totals.items()},
-            'editable_capture_mode':'packed_lossless' if self.packed else 'standard',
+            'editable_capture_mode':'compressed_rgb_lossless_alpha' if self.packed else 'standard',
             'editable_tracks':[dict(alpha=track.alpha,frames=track.frame_count,error=track.error) for track in self.companions],
             'capture_mean_ms': round(self.capture_total_ms / max(1, self.capture_calls), 2),
             'capture_max_ms': round(self.capture_max_ms, 2),
@@ -367,22 +400,28 @@ class CanvasRecorder:
             if self._stream is not None:
                 self._stream.stop()
                 self._stream.close()
+            audio_failure=None
             if self._audio_worker is not None:
                 self._audio_worker.join(timeout=10)
                 if self._audio_worker.is_alive():
-                    raise RuntimeError('Audio DSP worker timed out')
-            if hasattr(self, '_audio_file'):
+                    audio_failure='Audio DSP worker timed out'
+                    self._retain_live_audio=True
+            if hasattr(self, '_audio_file') and not audio_failure:
                 self._audio_file.close()
             self._frames.put(None, timeout=15)
             self._writer.join(timeout=60)
             if self._writer.is_alive():
                 raise RuntimeError('Encoder frame writer timed out')
             self._video.stdin.close()
-            diagnostics = self._video.stderr.read().decode('utf-8', 'replace')
-            self._video.stderr.close()
-            code = self._video.wait(timeout=60)
+            self._video.stdin=None
+            _,errors=self._video.communicate(timeout=60)
+            diagnostics=errors.decode('utf-8','replace')
+            code=self._video.returncode
             if code != 0:
                 raise RuntimeError('FFmpeg video encoding failed: ' + diagnostics[-1500:])
+            self.capture_bytes=self._silent.stat().st_size
+            if audio_failure:
+                raise RuntimeError(audio_failure)
             if self.error:
                 raise RuntimeError(self.error)
             if self.frame_count == 0:
@@ -391,9 +430,11 @@ class CanvasRecorder:
                 self.processing_stage='Preparing editable source tracks…'
                 captured=self._silent.with_name('captured.mp4')
                 graph=self._silent.with_name('unpack.ffscript')
+                tagged=supports_alpha_conversion(self._ffmpeg)
+                alpha_tag=',setparams=alpha_mode=premultiplied' if tagged else ''
                 graph.write_text(f'[0:v]split=3[c][b][f];[c]crop={self.width}:{self.height}:0:0[capture];'
                     f'[b]crop={self.width}:{self.height}:0:{self.height}[background];'
-                    f'[f]crop={self.width}:{self.height}:0:{self.height*2}[foreground]',encoding='utf-8')
+                    f'[f]crop={self.width}:{self.height}:0:{self.height*2}[foreground_color];[foreground_color][0:v:1]alphamerge{alpha_tag}[foreground]',encoding='utf-8')
                 from edit_pipeline import run_media
                 tagged=supports_alpha_conversion(self._ffmpeg)
                 command=[self._ffmpeg,'-y','-v','error']+(['-alpha_mode','premultiplied'] if tagged else [])+[
@@ -489,6 +530,18 @@ class CanvasRecorder:
                 atomic_json(self.path.with_suffix('.alignment.json'), self.processing_result['alignment'])
         except Exception as exc:
             self.error = str(exc)
+            audio_worker=getattr(self,'_audio_worker',None)
+            if audio_worker is not None and audio_worker.is_alive():self._retain_live_audio=True
+            elif hasattr(self,'_audio_file'):
+                try:self._audio_file.close()
+                except OSError:pass
+            # Release a blocked encoder pipe before attempting recovery/cleanup.
+            if self._video is not None and self._video.poll() is None:
+                self._video.kill()
+                self._video.wait(timeout=5)
+            writer=getattr(self,'_writer',None)
+            if writer is not None and writer.is_alive():writer.join(timeout=2)
+            if writer is not None and writer.is_alive():self._retain_live_audio=True
             # If analysis/source retention fails after capture encoding, recover the playable take.
             candidate=locals().get('ready')
             if candidate is None and self.packed and getattr(self,'_packed_source',Path('missing')).is_file():
@@ -500,7 +553,12 @@ class CanvasRecorder:
                         publish_file(self._packed_source,recovery)
                     from update_core import atomic_json
                     atomic_json(recovery.with_suffix('.json'),dict(width=self.width,height=self.height,fps=self.fps,
-                        planes=['captured','background','foreground'],premultiplied=True,error=self.error))
+                        planes=['captured','background','foreground'],color_stream=0,alpha_stream=1,
+                        color_codec='h264_rgb_crf18',premultiplied=True,error=self.error))
+                    if self._wave.exists() and not getattr(self,'_retain_live_audio',False):
+                        audio_recovery=self.path.with_suffix('.recovery.wav')
+                        from edit_pipeline import publish_file
+                        publish_file(self._wave,audio_recovery)
                     self.error+='; layered source recovered at '+str(recovery)
                 except OSError:
                     self.error+='; temporary layered source retained at '+str(self._packed_source)
@@ -520,7 +578,14 @@ class CanvasRecorder:
                 # Diagnostics must never prevent finalizing an otherwise valid MP4.
                 pass
             if self._temp is not None:
-                self._temp.cleanup()
+                if getattr(self,'_retain_live_audio',False):
+                    self.error+='; audio workspace retained at '+self._temp.name
+                    self._temp._finalizer.detach()
+                else:
+                    try:self._temp.cleanup()
+                    except OSError as cleanup_error:
+                        self._temp._finalizer.detach()
+                        self.error=(self.error or '')+'; workspace retained: '+str(cleanup_error)
             self.finished = True
 
     def abort(self):
@@ -568,6 +633,9 @@ class CanvasRecorder:
                             pass
             if self._temp is not None:
                 attempt(self._temp.cleanup)
+        watchdog=getattr(self,'_watchdog',None)
+        if watchdog is not None:watchdog.join(timeout=1)
+        attempt(lambda:self.path.with_suffix('.stall.json').unlink(missing_ok=True))
         if errors:
             raise RuntimeError('; '.join(errors))
         self.finished = True

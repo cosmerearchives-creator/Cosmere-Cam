@@ -168,8 +168,8 @@ class DiscardTests(unittest.TestCase):
             r._writer = Mock()
             r._writer.is_alive.return_value = False
             r._video = Mock()
-            r._video.wait.return_value = 0
-            r._video.stderr.read.return_value = b''
+            r._video.returncode = 0
+            r._video.communicate.return_value = (b'',b'')
             r._finish()
             self.assertIsNone(r.error)
             self.assertEqual(r.path.read_bytes(), b'encoded video')
@@ -178,4 +178,3 @@ class DiscardTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
