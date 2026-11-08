@@ -109,6 +109,20 @@ class Recovery(unittest.TestCase):
         payload=output.getvalue();self.assertEqual(r.encoder_writes,31);self.assertEqual(len(payload),31*64)
         self.assertEqual(payload[:4],bytes([255,0,0,255]));self.assertEqual(payload[-4:],bytes([0,0,255,255]))
 
+    def test_queue_pressure_keeps_duration_and_latest_frame_with_bounded_memory(self):
+        import io
+        from types import SimpleNamespace
+        r=CanvasRecorder('unused.mp4',4,4,30,microphone=False);r._frames=queue.Queue(maxsize=2)
+        with patch.object(r,'frames_due',return_value=1):
+            for index in range(8):
+                image=QImage(4,4,QImage.Format.Format_ARGB32_Premultiplied);image.fill(QColor(index*20,0,0));r.push_frame(image)
+        self.assertIsNone(r.error);self.assertEqual(r._frames.qsize(),2);self.assertGreater(r.queue_batches_coalesced,0)
+        output=io.BytesIO();r._video=SimpleNamespace(stdin=output)
+        reader=threading.Thread(target=r._write_frames);reader.start();r._frames.put(None);reader.join(2)
+        self.assertFalse(reader.is_alive());self.assertEqual(len(output.getvalue()),8*64)
+        self.assertEqual(output.getvalue()[-4:],bytes([0,0,140,255]))
+        self.assertLess(r.encoded_unique_frames,8)
+
     def test_pause_rejects_capture_without_waiting_for_device_close(self):
         r=CanvasRecorder('unused.mp4',64,64,10);r._started=time.monotonic();r._stream=Mock()
         r.pause_capture();self.assertTrue(r.stopping);r._stream.stop.assert_not_called()
