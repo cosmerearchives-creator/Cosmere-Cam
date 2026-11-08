@@ -1,0 +1,128 @@
+Cosmere Video Recording Suite Community License — Custom Terms v0.1
+Published November 8, 2026
+
+
+Adapted from the Archives of Arcanum Community License v0.1 for this distinct
+project. This does not change licenses already granted for earlier releases.
+
+These are the community terms offered by the publishing maintainer
+(cosmerearchives-creator) for rights they can license in Cosmere Video Recording Suite. They are
+a proposed, unreviewed custom license, not an OSI-approved open source license
+and not a PolyForm license. Publication offers the permissions below now;
+"proposed" describes the need for legal review, not a requirement to register
+or await individual approval for a permitted use.
+
+1. Scope and grant
+"Software" means the original Cosmere Video Recording Suite code and accompanying project
+documentation made available with these terms, including modifications of
+that material. It excludes separately licensed third-party material and user
+output. Subject to these terms, the applicable rights holders grant you a
+worldwide, royalty-free, nonexclusive permission to copy, run, study, and
+modify the Software for the permitted uses below, and to redistribute it only
+as allowed in section 4. No rights beyond those the licensor holds are granted.
+
+2. Permitted users and uses
+(a) Anyone may use and modify the Software for personal, educational, research,
+or other noncommercial purposes. This does not cover organizational commercial
+deployment described in section 5.
+(b) An independent individual creator may use and modify it to create and
+monetize their own output without any revenue, audience, or success ceiling.
+An entity wholly owned and controlled by that individual, employing no other
+people in the creative undertaking, may exercise the same permission. Acting
+as an employee, agent, or deployment intermediary for an otherwise ineligible
+organization does not qualify as independent individual use.
+(c) A qualifying small creator team may use and modify it in its own creative
+work, including monetized output. At first actual use, the undertaking must
+have no more than five natural persons working in it (owners, employees, and
+regular contractors combined, across related entities), and be majority owned
+and controlled by those active individual creators. It must not be controlled
+by, a subsidiary of, or an internal unit of another organization. Splitting
+one undertaking into nominally separate teams does not create eligibility.
+There is no revenue ceiling.
+(d) A team that qualifies under (c) is grandfathered: the same continuous
+creator-controlled undertaking may keep using and modifying this licensed
+version as it grows beyond five people or becomes successful. Incorporation
+or a name change alone does not end this permission. Acquisition, merger
+into another undertaking, or loss of majority ownership or control by its
+qualifying original creators ends grandfathering for organizational commercial
+use. It cannot be transferred to an acquirer, parent, affiliates, or unrelated
+business. Individual creators retain their independent permission under (b).
+(e) Keep reasonable private, dated records of initial qualification if relying
+on (d). No submission, registration, telemetry, account, or online license
+verification is required. Good-faith local records suffice absent contrary
+evidence. These permissions do not require a donation, shout-out, or credit
+in creative output.
+
+3. Your output and offline use
+The licensor claims no ownership of your notes, maps, research, scripts,
+videos, books, or other output merely because you used Cosmere Video Recording Suite. You retain
+whatever rights you otherwise have in that output and may sell or license it.
+Output does not include Software copied into or distributed as a product.
+You remain responsible for rights in imported material and third-party content.
+The full local, offline-first core may be used without an account, sync, AI,
+telemetry, or online license verification. Optional services have their own
+terms and possible costs; this license promises neither their availability
+nor any particular feature, future update, hosting, or support.
+
+4. Noncommercial redistribution and modifications
+You may share original or modified source and binaries free of charge for
+noncommercial purposes, retaining this license, existing copyright notices,
+and required third-party notices. Provide corresponding modifiable source
+with binaries or a working, free source link for that exact version. Clearly
+mark modifications and their author; do not imply an official release or
+endorsement. Recipients receive covered material under these same terms;
+you may not impose restrictions that remove these permissions. Your own
+separable contributions remain yours, subject to rights needed to distribute
+the combined work under these terms.
+You may not sell, rent, sublicense for a fee, place behind a payment gate,
+include in a paid bundle, or commercially host/provide the Software or a
+modified/rebranded derivative as a product or service without a separate
+written commercial license. Voluntary donations must not condition access,
+features, updates, or permission to use it. Selling creative output under
+sections 2–3 is expressly permitted and is not resale of the Software.
+
+5. Separate commercial licensing
+Commercial adoption by any organization outside section 2, including large
+media companies, requires a separately negotiated written paid commercial
+license before deployment. Software resale, commercial hosting, and selling
+or commercially supplying a rebranded/custom fork also require that license,
+even for an otherwise qualifying creator or team. A commercial agreement may
+authorize branding or a custom fork only to the extent expressly agreed.
+Start an inquiry at https://github.com/cosmerearchives-creator/Cosmere-Cam/issues
+and request a private contact route before sharing confidential details.
+Issues are public and require GitHub sign-in; no fee, response time, approval,
+private channel, or commercial license availability is promised by this text.
+
+6. Third-party rights, contributions, and identity
+Third-party components, fonts, artwork, and other separately licensed material
+keep their own licenses; preserve and comply with those terms. These terms
+do not relicense them or resolve conflicting obligations. Where a contributor
+or other rights holder has not authorized this grant, obtain their permission
+or omit their material. This publication does not establish a completed
+dependency, provenance, or contributor-rights audit or retroactively relicense
+earlier releases that did not include it.
+Contributors keep their copyrights. No copyright assignment, blanket consent
+to future relicensing, or right to sell others' contributions is implied.
+Commercial licensing must separately clear any rights not held by the maintainer.
+No trademark rights or endorsement are granted. Descriptive attribution is
+allowed, but names/logos and modified branding need independent clearance;
+no claim of trademark registration, exclusivity, or clearance is made.
+
+7. Duration and breach
+Permissions for a copy received under these terms continue while you comply;
+a later license change does not withdraw them for that copy. Future releases
+may have different terms. Permissions terminate upon material breach and
+automatically reinstate if cured within 30 days after you first learn of it,
+unless the breach is repeated after prior reinstatement. Termination does not
+transfer ownership of your output. Rights and exceptions under applicable law
+are not restricted. If a provision is unenforceable, the rest remains effective
+to the extent permitted by law; no excluded use is thereby affirmatively licensed.
+
+8. Disclaimer and limitation
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE SOFTWARE IS PROVIDED "AS IS"
+AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND
+NONINFRINGEMENT. NO LICENSOR OR CONTRIBUTOR IS LIABLE FOR CLAIMS, DAMAGES,
+OR OTHER LIABILITY ARISING FROM THE SOFTWARE OR ITS USE, WHETHER IN CONTRACT,
+TORT, OR OTHERWISE, INCLUDING LOST DATA, LOST PROFITS, OR BUSINESS INTERRUPTION.
+NOTHING EXCLUDES LIABILITY OR MANDATORY RIGHTS THAT CANNOT LAWFULLY BE EXCLUDED.

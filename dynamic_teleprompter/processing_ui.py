@@ -1,11 +1,38 @@
 """Recording choices and review of complete-script word timings."""
 from pathlib import Path
-from PySide6.QtCore import Qt,QThread,Signal,QUrl
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt,QThread,Signal,QUrl,QTimer
+from PySide6.QtGui import QColor,QDesktopServices
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
     QComboBox, QDoubleSpinBox, QPushButton, QTableWidget, QTableWidgetItem, QAbstractItemView,
-    QHeaderView, QMessageBox)
+    QHeaderView, QMessageBox,QProgressBar)
 from update_core import atomic_json
+
+
+class RecordingProgress(QDialog):
+    def __init__(self,parent,recorder):
+        super().__init__(parent);self.recorder=recorder;self.setWindowTitle('Recording processing');self.resize(600,220)
+        box=QVBoxLayout(self);self.stage=QLabel('Finalizing capture…');self.stage.setWordWrap(True);box.addWidget(self.stage)
+        self.bar=QProgressBar();self.bar.setFormat('%p% of this stage');self.bar.setRange(0,0);box.addWidget(self.bar)
+        self.details=QLabel();self.details.setWordWrap(True);box.addWidget(self.details)
+        open_folder=QPushButton('Open Diagnostics Folder');open_folder.clicked.connect(self.open_folder);box.addWidget(open_folder)
+        close=QPushButton('Hide progress');close.clicked.connect(self.hide);box.addWidget(close)
+        self.timer=QTimer(self);self.timer.timeout.connect(self.refresh);self.timer.start(200)
+    def open_folder(self):
+        folder=self.recorder.path.with_suffix('.processing')
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder if folder.is_dir() else folder.parent)))
+    def refresh(self):
+        state=dict(self.recorder.processing_progress);name=state.get('stage','Finalizing capture')
+        percent=state.get('percent')
+        if percent is None:self.bar.setRange(0,0)
+        else:self.bar.setRange(0,100);self.bar.setValue(round(percent))
+        hint='No recent progress detected; checking for a stall.' if state.get('stalled') else ('Working slowly' if str(state.get('speed','')).startswith('0.') else 'Working')
+        self.stage.setText(name)
+        self.details.setText(f"Elapsed: {state.get('elapsed_seconds',0):.0f}s • Stage: {state.get('stage_seconds',0):.0f}s\n{hint}  {state.get('speed','')}")
+        if self.recorder.finished:
+            self.timer.stop();self.bar.setRange(0,100)
+            if self.recorder.error or self.recorder.processing_error:self.stage.setText('Processing stopped. Original or recovery take retained.');self.bar.setValue(0)
+            elif self.recorder.awaiting_review:self.stage.setText('Waiting for your word-timing review');self.bar.setValue(100)
+            else:self.stage.setText('Recording saved');self.bar.setValue(100)
 
 
 class ProcessingChoices(QDialog):

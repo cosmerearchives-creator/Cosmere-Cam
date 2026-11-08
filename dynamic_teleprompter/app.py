@@ -63,15 +63,18 @@ def dictionary_display_name():
 WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
 
 
+from pronunciations import dictionary_word
+
 class Proofreader(QSyntaxHighlighter):
     """On-device basic proofreader; custom words persist between sessions."""
     def __init__(self, document):
         super().__init__(document)
         self.speller = SpellChecker(distance=1)
         self.custom_words = set()
+        self.pronunciation_words=set()
         try:
             data = json.loads(DICTIONARY_PATH.read_text(encoding='utf-8'))
-            self.custom_words = {str(x).lower() for x in data if isinstance(x, str)}
+            self.custom_words = {dictionary_word(x) for x in data if isinstance(x, str)}
         except (OSError, ValueError, TypeError):
             pass
         self.speller.word_frequency.load_words(self.custom_words)
@@ -85,7 +88,7 @@ class Proofreader(QSyntaxHighlighter):
         self.grammar_format.setUnderlineColor(QColor('#D99416'))
 
     def add_word(self, word):
-        word = word.strip().lower()
+        word = dictionary_word(word.strip())
         if not re.fullmatch(r"[a-z]+(?:['’][a-z]+)?", word):
             return False
         self.custom_words.add(word)
@@ -94,13 +97,20 @@ class Proofreader(QSyntaxHighlighter):
         self.rehighlight()
         return True
 
+    def misspelled(self,word):
+        key=dictionary_word(word)
+        if key in self.custom_words or key in self.pronunciation_words or not self.speller.unknown([key]):return False
+        if key.endswith("'s"):
+            base=key[:-2]
+            if base in self.custom_words or base in self.pronunciation_words or not self.speller.unknown([base]):return False
+        return True
+
     def highlightBlock(self, text):
         words = list(WORD_RE.finditer(text))
         if self.check_spelling:
             for match in words:
                 word = match.group()
-                if (len(word) > 1 and word.lower() not in self.custom_words
-                        and self.speller.unknown([word.lower()])):
+                if (len(word) > 1 and self.misspelled(word)):
                     self.setFormat(match.start(), len(word), self.spelling_format)
         if self.check_grammar:
             # A small set of useful local heuristics, not a full grammar engine.
@@ -122,9 +132,16 @@ class ScriptEditor(QTextEdit):
         menu = self.createStandardContextMenu()
         cursor = self.cursorForPosition(event.pos())
         cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+        plain=self.toPlainText()
+        position=cursor.position()
+        for match in WORD_RE.finditer(plain):
+            start=len(plain[:match.start()].encode('utf-16-le'))//2
+            end=start+len(match.group().encode('utf-16-le'))//2
+            if start<=position<=end:
+                cursor.setPosition(start);cursor.setPosition(end,QTextCursor.MoveMode.KeepAnchor);break
         word = cursor.selectedText().strip()
-        if word and self.proofreader.check_spelling and self.proofreader.speller.unknown([word.lower()]):
-            candidates = self.proofreader.speller.candidates(word.lower()) or set()
+        if word and self.proofreader.check_spelling and self.proofreader.misspelled(word):
+            candidates = self.proofreader.speller.candidates(dictionary_word(word)) or set()
             suggestions = sorted(candidates, key=lambda x: (self.proofreader.speller.word_usage_frequency(x) * -1, x))[:5]
             if suggestions:
                 menu.addSeparator()
@@ -1862,6 +1879,7 @@ class VoiceWorker(QThread):
     def __init__(self, device=None, script='', model_path=None):
         super().__init__()
         self.script_hint = script
+        self.pronunciations=[]
         self.model_path = model_path or MODEL_DIR
         self.ready_for_recording = False
         self.reset_requested = threading.Event()
@@ -1891,10 +1909,12 @@ class VoiceWorker(QThread):
             def make_recognizer():
                 recognizer = KaldiRecognizer(model, samplerate)
                 words = normalized_words(self.script_hint)
+                from pronunciations import mappings
+                pronunciation_hints=[' '.join(item[0]) for item in mappings(self.pronunciations,words)]
                 if words and (Path(self.model_path)/'graph'/'HCLr.fst').is_file():
                     phrases = [' '.join(words[i:i+8]) for i in range(0, min(len(words), 8000), 8)]
                     try:
-                        recognizer.SetGrammar(json.dumps(phrases + sorted(set(words)) + ['[unk]']))
+                        recognizer.SetGrammar(json.dumps(phrases + pronunciation_hints + sorted(set(words)) + ['[unk]']))
                     except Exception:
                         pass  # Larger static-graph models retain unrestricted recognition.
                 return recognizer
@@ -2137,6 +2157,8 @@ class MainWindow(QMainWindow):
         self._lip_timer.start()
         self.layer_editor = None
         self.local_settings = QSettings('CosmereArchives', 'DynamicTeleprompter')
+        from pronunciations import load as load_pronunciations
+        self.pronunciation_entries=load_pronunciations()
         self.model_library = self._read_model_library()
         self.active_model_layer = None
         self._movement_order = []
@@ -2880,6 +2902,7 @@ class MainWindow(QMainWindow):
             lip_microphone.stop()
             self.recorder.audio_level_listener = lip_microphone.feed
             self.recorder.script = self.script.toPlainText()
+            self.recorder.pronunciations=list(self.pronunciation_entries)
             self.recorder.render_project = self._project_payload()
             self.recorder.render_project['groups'] = list(self.groups)
             self.recorder.model_path = self.local_settings.value('voice_model_path', '', type=str) or str(MODEL_DIR)
@@ -2960,6 +2983,9 @@ class MainWindow(QMainWindow):
                                                                  self._voice_model_available()).options()
         self.record_caption.setText('Saving…')
         self.recorder.finish_async()
+        from processing_ui import RecordingProgress
+        self.recording_progress=RecordingProgress(self,self.recorder)
+        self.recording_progress.show()
         self.record_finish_timer.start()
 
     def _discard_recording(self):
@@ -3012,6 +3038,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Recording failed', recorder.error)
         elif recorder.cancelled:
             self.record_status.setText('Take discarded. Ready to record again.')
+        elif recorder.processing_error:
+            self.record_status.setText('Original saved: '+str(recorder.path)+' — optional processing stopped.')
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            message=QMessageBox(QMessageBox.Icon.Warning,'Original take saved','Optional processing did not finish. Your original take is here:\n'+str(recorder.path)+'\n\n'+recorder.processing_error[-1200:],parent=self)
+            diagnostics=message.addButton('Open Diagnostics Folder',QMessageBox.ButtonRole.ActionRole)
+            message.addButton(QMessageBox.StandardButton.Close)
+            diagnostics.clicked.connect(lambda:QDesktopServices.openUrl(QUrl.fromLocalFile(str(recorder.path.with_suffix('.processing')))))
+            message.exec()
         elif getattr(recorder, 'awaiting_review', False):
             self.record_status.setText('Analysis ready — approve word timings, then export. Source take retained.')
         else:
@@ -3020,9 +3055,6 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, 'Recording saved',
                                     str(recorder.path) + '\n\nDiagnostics: ' + str(recorder.report_path))
 
-        if recorder.processing_error:
-            QMessageBox.warning(self, 'Original take saved',
-                'Optional processing could not finish. Your original take was retained.\n' + recorder.processing_error)
         if 'alignment' in recorder.processing_result:
             self._open_alignment_review(recorder.processing_result['alignment'],
                                         recorder.path.with_suffix('.alignment.json'))
@@ -3636,13 +3668,16 @@ class MainWindow(QMainWindow):
         self.model_test_status = QLabel('Checking installed model…')
         model_box_layout.addWidget(self.model_test_status)
         dm.addWidget(model_box)
+        from pronunciation_ui import PronunciationPanel
+        self.pronunciation_panel=PronunciationPanel(self)
+        dm.addWidget(self.pronunciation_panel)
         dm.addWidget(QLabel('Speech/Hybrid comparison test (manual simulation):'))
         dm.addWidget(QLabel('Enter what the recognition engine might have heard for the current script group.'))
         self.spoken = QLineEdit()
         self.spoken.setPlaceholderText('e.g. The ancient kingdom of Veloria')
         self.spoken.textChanged.connect(self.render)
         dm.addWidget(self.spoken)
-        dm.addWidget(QLabel('In v0.1, Hybrid chooses script text when sufficiently similar, otherwise spoken text.'))
+        dm.addWidget(QLabel('Hybrid prefers script spelling when sufficiently similar to recognized speech.'))
         dm.addStretch()
         # Voice Tracking > Speech Test
 
@@ -3773,7 +3808,13 @@ class MainWindow(QMainWindow):
         self.start_presentation_button.clicked.connect(self.start_presentation)
         startup_layout.addWidget(self.start_presentation_button)
         settings_home_layout.addWidget(startup_box)
+        self.window_priority=QCheckBox('Keep Output and Teleprompter above the Control Center')
+        self.window_priority.setChecked(True)
+        self.window_priority.setToolTip('Display windows stay above this Suite window without covering unrelated applications.')
+        self.window_priority.toggled.connect(self._apply_window_priority)
+        settings_home_layout.addWidget(self.window_priority)
         settings_home_layout.addWidget(self.dictionary_button)
+        QTimer.singleShot(0,self._apply_window_priority)
         save_display = QPushButton('Save Display Settings as Defaults')
         save_display.clicked.connect(self.save_settings)
         settings_home_layout.addWidget(save_display)
@@ -3804,6 +3845,8 @@ class MainWindow(QMainWindow):
         save_action = file_menu.addAction('Save Project', lambda: self.save_project())
         # A main-window shortcut also works when the menu bar is hidden.
         file_menu.addAction('Save Project As…', lambda: self.save_project(save_as=True))
+        file_menu.addAction('Export Project…', self.export_project)
+        file_menu.addAction('Open Exported Project…', self.open_exported_project)
         file_menu.addSeparator()
         file_menu.addAction('Exit', self.close)
 
@@ -3837,7 +3880,8 @@ class MainWindow(QMainWindow):
         help_menu = menu.addMenu('&Help')
         help_menu.addAction('About ' + APP_NAME, lambda: QMessageBox.information(
             self, 'About ' + APP_NAME,
-            f'{APP_NAME} {APP_VERSION}\n\n{APP_NEWS}'))
+            f'{APP_NAME} {APP_VERSION}\n\n{APP_NEWS}\n\nOriginal Suite code: Community License. Separate components retain their licenses.'))
+        help_menu.addAction('Licenses and source notices', self.open_license_folder)
         # Classic Alt-to-show menu; no permanent menu row consuming screen space.
         self._menu_open = False
         self._alt_down = False
@@ -3849,6 +3893,13 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence('Ctrl+S'), self, lambda: self.save_project())
         QShortcut(QKeySequence('Ctrl+Shift+M'), self, self.cycle_model)
 
+
+    def open_license_folder(self):
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        folder=Path(sys.executable).parent/'licenses'
+        if not folder.is_dir():folder=Path(__file__).resolve().parent.parent
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def _show_menu_temporarily(self):
         self.menuBar().show()
@@ -4035,6 +4086,11 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def _apply_window_priority(self,*_):
+        from window_order import set_owner
+        enabled=self.window_priority.isChecked()
+        for window in (self.out,self.reader):set_owner(self,window,enabled)
+
     def _show_obs_window(self):
         if self.out.isMinimized():
             self.out.showNormal()
@@ -4050,6 +4106,7 @@ class MainWindow(QMainWindow):
         window.setGeometry(geometry)
         window.show()
         window.raise_()
+        self._apply_window_priority()
 
     def _preview_window(self):
         if self.animation_test_window is None:
@@ -4102,6 +4159,7 @@ class MainWindow(QMainWindow):
         win.set_output(['', '', ''], {**self._test_settings(), 'instant': True})
         self.test_voice_worker = VoiceWorker(self.microphones.currentData(), ' '.join(self.test_groups),
                                              self.local_settings.value('voice_model_path', '', type=str) or None)
+        self.test_voice_worker.pronunciations=list(self.pronunciation_entries)
         self.test_voice_worker.recognized.connect(self._on_animation_test_recognized)
         self.test_voice_worker.failed.connect(self._on_animation_test_failed)
         self.test_voice_worker.finished.connect(self._animation_test_worker_finished)
@@ -4395,6 +4453,7 @@ class MainWindow(QMainWindow):
         self.last_input_time = 0.0
         self.voice_worker = VoiceWorker(self.microphones.currentData(), self.script.toPlainText(),
                                         self.local_settings.value('voice_model_path', '', type=str) or None)
+        self.voice_worker.pronunciations=list(self.pronunciation_entries)
         self.voice_worker.recognized.connect(self.on_recognized)
         self.voice_worker.input_level.connect(self.on_input_level)
         self.voice_worker.input_peak.connect(self._on_input_peak)
@@ -4458,7 +4517,7 @@ class MainWindow(QMainWindow):
 
     def align_voice(self, heard):
         script_words = normalized_words(' '.join(self.groups))
-        candidate = match_progress(script_words, normalized_words(heard)[-14:], self.voice_cursor)
+        candidate = match_progress(script_words, normalized_words(heard)[-14:], self.voice_cursor,aliases=self.pronunciation_entries)
         if candidate <= self.voice_cursor:
             return
         self.voice_cursor = candidate
@@ -4608,7 +4667,7 @@ class MainWindow(QMainWindow):
         return values
 
     def settings(self):
-        return dict(keep_editable=self.keep_editable.isChecked(), first_slide=self.start_first_slide.isChecked(),
+        return dict(keep_windows_above_main=self.window_priority.isChecked(),pronunciations=self.pronunciation_entries,keep_editable=self.keep_editable.isChecked(), first_slide=self.start_first_slide.isChecked(),
                     voice_following=self.start_voice_following.isChecked(),
                     mode=self.mode.currentText(), grouping=self.grouping.currentText(),
                     group_limit=self.group_limit.value(), chars=self.chars.value(),
@@ -4877,7 +4936,7 @@ class MainWindow(QMainWindow):
         self.render()
 
     def _project_payload(self):
-        return dict(format='DynamicTeleprompterProject', version=1,
+        return dict(format='DynamicTeleprompterProject', version=1,model_library=self.model_library,
                     script=self.script.toPlainText(), settings=self.settings(),
                     visual_global=self.visual_global,
                     slide_visuals={str(k): v for k, v in self.slide_visuals.items()},
@@ -4916,49 +4975,94 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Project save error', str(exc))
             return False
 
+    def export_project(self):
+        if self.recorder is not None:
+            QMessageBox.information(self,'Recording in progress','Finish recording before exporting a project.');return
+        target,_=QFileDialog.getSaveFileName(self,'Export Project',str(Path.home()/'Cosmere-project.zip'),'Project ZIP (*.zip)')
+        if not target:return
+        if not target.lower().endswith('.zip'):target+='.zip'
+        try:self.plugin_controller.capture_for_save()
+        except Exception as error:QMessageBox.warning(self,'Plugin state could not be saved',str(error));return
+        from project_transfer_ui import ProjectTransfer
+        self.project_transfer=ProjectTransfer(self,project=self._project_payload(),destination=target);self.project_transfer.show()
+
+    def open_exported_project(self):
+        if self.recorder is not None:
+            QMessageBox.information(self,'Recording in progress','Finish recording before opening a project.');return
+        folder=QFileDialog.getExistingDirectory(self,'Select the extracted project source folder')
+        if folder:self._open_exported_folder(folder)
+
+    def _open_exported_folder(self,folder):
+        from project_transfer_ui import ProjectTransfer
+        self.project_transfer=ProjectTransfer(self,folder=folder)
+        self.project_transfer.imported.connect(self._import_project_payload);self.project_transfer.show()
+
+    def _import_project_payload(self,data,folder):
+        try:
+            trusted=self._audio_chain_snapshot();unavailable=[]
+            for entry in data.get('settings',{}).get('audio_chain',[]):
+                if entry.get('type') not in ('vst2','vst3'):continue
+                matches=[item for item in trusted if item['type']==entry['type'] and Path(item.get('path','')).name.casefold()==Path(entry.get('path','')).name.casefold() and Path(item.get('path','')).exists()]
+                if len(matches)==1:
+                    entry['path']=matches[0]['path'];entry['enabled']=entry.pop('requested_enabled',False)
+                else:entry['enabled']=False;unavailable.append(Path(entry.get('path','')).name)
+            self._apply_project_payload(data,Path(folder)/'project.teleprompter.json')
+            self.project_path=None;self.project_label.setText('Imported: '+Path(folder).name)
+            if unavailable:QMessageBox.information(self,'External plugins','Media was restored. Install/select these external plugins before enabling them:\n'+'\n'.join(unavailable))
+        except Exception as error:QMessageBox.warning(self,'Project import error',str(error))
+
     def open_project(self):
         if self.recorder is not None:
-            QMessageBox.information(self, 'Recording in progress', 'Finish the recording before opening another project.')
-            return
-        selected, _ = QFileDialog.getOpenFileName(self, 'Open teleprompter project', '',
-                                                  'Teleprompter projects (*.teleprompter.json *.json)')
-        if not selected:
-            return
+            QMessageBox.information(self,'Recording in progress','Finish the recording before opening another project.');return
+        selected,_=QFileDialog.getOpenFileName(self,'Open teleprompter project','','Teleprompter projects (*.teleprompter.json *.json)')
+        if not selected:return
         try:
-            path = Path(selected)
-            data = json.loads(path.read_text(encoding='utf-8'))
-            if not isinstance(data, dict) or data.get('format') != 'DynamicTeleprompterProject':
-                raise ValueError('This is not a Dynamic Teleprompter project file.')
-            if not isinstance(data.get('settings'), dict) or not isinstance(data.get('script'), str):
-                raise ValueError('Project is missing valid script or settings data.')
-            self.stop_listening()
-            self._stop_monitor()
-            import vst2_host
-            vst2_host.close_all()
-            self.apply_settings_values(data['settings'])
-            self.visual_global = dict(data.get('visual_global') or {})
-            self.slide_visuals = {int(key): dict(value) for key, value in
-                                  (data.get('slide_visuals') or {}).items()}
-            self.global_effect_exclusions = {
-                int(n) for n in (data.get('global_effect_exclusions') or [])
-                if isinstance(n, int) and n > 0
-            }
-            self.animation_global = {**ANIMATION_DEFAULT, **dict(data.get('animation_global') or {})}
-            self.animation_slides = {int(k): dict(v) for k, v in (data.get('animation_slides') or {}).items()}
-            self.script.setPlainText(data['script'])
-            startup = data.get('startup') or {}
-            self.start_first_slide.setChecked(bool(startup.get('first_slide', True)))
-            self.start_voice_following.setChecked(bool(startup.get('voice_following', True)))
-            self.prepare_groups()
-            self.project_path = path
-            self.project_label.setText(path.name)
-            self.effect_status.setText(f'Loaded effects from {path.name}. Use Apply to edit them.')
-            self.motion_status.setText(f'Loaded animation settings from {path.name}.')
-            self._saved_project_snapshot = self._project_snapshot()
-        except Exception as exc:
-            QMessageBox.warning(self, 'Project open error', str(exc))
+            path=Path(selected)
+            if path.name=='project.teleprompter.json' and (path.parent/'project-manifest.json').is_file():self._open_exported_folder(path.parent);return
+            self._apply_project_payload(json.loads(path.read_text(encoding='utf-8')),path)
+        except Exception as error:QMessageBox.warning(self,'Project open error',str(error))
+
+    def _apply_project_payload(self,data,path):
+        if not isinstance(data,dict) or data.get('format')!='DynamicTeleprompterProject' or not isinstance(data.get('settings'),dict) or not isinstance(data.get('script'),str):raise ValueError('Invalid teleprompter project.')
+        self.pronunciation_panel.stop()
+        if self.pronunciation_panel.worker is not None and self.pronunciation_panel.worker.isRunning():
+            if not self.pronunciation_panel.worker.wait(1600):raise RuntimeError('Wait for the pronunciation microphone to stop before opening a project.')
+        self.stop_listening()
+        self._stop_monitor()
+        import vst2_host
+        vst2_host.close_all()
+        self.apply_settings_values(data['settings'])
+        self.visual_global = dict(data.get('visual_global') or {})
+        self.slide_visuals = {int(key): dict(value) for key, value in
+                              (data.get('slide_visuals') or {}).items()}
+        self.global_effect_exclusions = {
+            int(n) for n in (data.get('global_effect_exclusions') or [])
+            if isinstance(n, int) and n > 0
+        }
+        self.animation_global = {**ANIMATION_DEFAULT, **dict(data.get('animation_global') or {})}
+        self.animation_slides = {int(k): dict(v) for k, v in (data.get('animation_slides') or {}).items()}
+        self.script.setPlainText(data['script'])
+        startup = data.get('startup') or {}
+        self.start_first_slide.setChecked(bool(startup.get('first_slide', True)))
+        self.start_voice_following.setChecked(bool(startup.get('voice_following', True)))
+        self.prepare_groups()
+        self.project_path = path
+        self.project_label.setText(path.name)
+        self.effect_status.setText(f'Loaded effects from {path.name}. Use Apply to edit them.')
+        self.motion_status.setText(f'Loaded animation settings from {path.name}.')
+        self._saved_project_snapshot = self._project_snapshot()
+        if 'model_library' in data:
+            self.model_library=[dict(item) for item in data['model_library'] if isinstance(item,dict) and item.get('path')]
+            self._write_model_library()
+        self._saved_project_snapshot=self._project_snapshot()
 
     def apply_settings_values(self, values):
+        self.window_priority.setChecked(bool(values.get('keep_windows_above_main',True)))
+        if 'pronunciations' in values:
+            from pronunciations import validate
+            self.pronunciation_entries=validate(values['pronunciations'])
+            self.pronunciation_panel.refresh()
+        self._apply_window_priority()
         self.keep_editable.setChecked(bool(values.get('keep_editable', True)))
         self.start_first_slide.setChecked(bool(values.get('first_slide', True)))
         self.start_voice_following.setChecked(bool(values.get('voice_following', True)))
@@ -5182,6 +5286,8 @@ class MainWindow(QMainWindow):
                                     'Please wait until the recording finishes saving before exiting.')
             event.ignore()
             return
+        self.pronunciation_panel.stop()
+        if self.pronunciation_panel.worker is not None:self.pronunciation_panel.worker.wait(1600)
         self._save_session()
         self._session_timer.stop()
         self.stop_animation_test()

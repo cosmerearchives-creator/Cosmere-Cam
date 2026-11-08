@@ -121,6 +121,9 @@ class CanvasRecorder:
         self.processing_result = {}
         self.processing_error = ''
         self.processing_stage = ''
+        self.processing_progress={}
+        self.processing_session=None
+        self.awaiting_review=False
         self.script = ''
         self.model_path = ''
         self._finish_started = False
@@ -130,7 +133,7 @@ class CanvasRecorder:
         ffmpeg = resolve_ffmpeg(self.ffmpeg_path)
         self._ffmpeg = ffmpeg
         if not ffmpeg:
-            raise RuntimeError('FFmpeg not found. Open Settings → FFmpeg Location to select ffmpeg.exe, or put it beside app.py.')
+            raise RuntimeError('FFmpeg not found. Open Settings â†’ FFmpeg Location to select ffmpeg.exe, or put it beside app.py.')
         if self.microphone:
             from vst2_host import latency, hide_editors
             hide_editors()
@@ -416,11 +419,23 @@ class CanvasRecorder:
             'recording_error': self.error,
             'processing': {key: value for key, value in self.processing_result.items() if key != 'alignment'},
             'processing_error': self.processing_error,
+            'post_processing':self.processing_session.report if self.processing_session else {},
+            'processing_directory':str(self.processing_session.directory) if self.processing_session else None,
             'notes': 'Timing diagnostics are indicative; not a frame-perfect AV synchronization measurement.'
         }
 
     def _finish(self):
+        from processing_session import ProcessingSession,_current
+        token=None
         try:
+            def update(state):
+                self.processing_progress=state;self.processing_stage=state['stage']
+            self.processing_session=ProcessingSession(self.path.with_suffix('.processing'),update)
+            self.processing_session.duration=self.frame_count/self.fps
+            self.processing_session.report['diagnostics_path']=str(self.report_path)
+            self.processing_session.report['process_choice_wait_seconds']=max(0,time.monotonic()-getattr(self,'_stopped',time.monotonic()))
+            token=_current.set(self.processing_session)
+            self.processing_session.begin('Finalizing capture')
             if self._stream is not None:
                 self._stream.stop()
                 self._stream.close()
@@ -451,7 +466,7 @@ class CanvasRecorder:
             if self.frame_count == 0:
                 raise RuntimeError('No frames were recorded')
             if self.packed:
-                self.processing_stage='Preparing editable source tracks…'
+                self.processing_stage='Preparing editable source tracksâ€¦'
                 captured=self._silent.with_name('captured.mp4')
                 graph=self._silent.with_name('unpack.ffscript')
                 tagged=supports_alpha_conversion(self._ffmpeg)
@@ -476,8 +491,8 @@ class CanvasRecorder:
                            '-i', str(self._silent), '-i', str(self._wave),
                            '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac',
                            '-b:a', '160k', '-shortest', '-movflags', '+faststart', str(ready)]
-                subprocess.run(command, check=True, capture_output=True, timeout=180,
-                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                self.processing_session.begin('Combining video and audio')
+                self.processing_session.run(command,duration=self.frame_count/self.fps)
             else:
                 shutil.copyfile(self._silent, ready)
             # Finish all editable tracks before analysis; each has exactly the main frame count.
@@ -500,7 +515,7 @@ class CanvasRecorder:
             if self.companions and not self.editable_failed and self.processing_options.get('align'):
                 editable_ready=ready.with_name('editable.mp4')
                 if self.microphone and self._wave.exists():
-                    subprocess.run([self._ffmpeg,'-y','-v','error','-i',str(self.companions[0].path),'-i',str(self._wave),
+                    self.processing_session.run([self._ffmpeg,'-y','-v','error','-i',str(self.companions[0].path),'-i',str(self._wave),
                         '-map','0:v','-map','1:a','-c:v','copy','-c:a','aac','-shortest',str(editable_ready)],
                         check=True,capture_output=True,timeout=180,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                 else:shutil.copyfile(self.companions[0].path,editable_ready)
@@ -509,13 +524,14 @@ class CanvasRecorder:
                 try:
                     from recording_processing import process_recording
                     selected, self.processing_result = process_recording(selected, self._ffmpeg,
-                        {**self.processing_options,'source_fps':self.fps}, self.script, self.model_path,
+                        {**self.processing_options,'source_fps':self.fps,'pronunciations':getattr(self,'pronunciations',[])}, self.script, self.model_path,
                         self.frame_count / self.fps, ready.parent,
                         lambda stage: setattr(self, 'processing_stage', stage))
                 except Exception as exc:
                     self.processing_error = str(exc)
                     selected = ready  # Optional processing must never destroy a take.
             if 'alignment' in self.processing_result and editable_ready is not None:
+                self.processing_session.begin('Preparing review sources')
                 from edit_pipeline import cut_media, publish_file
                 from update_core import atomic_json
                 bundle=self.path.with_suffix('.take')
@@ -533,6 +549,7 @@ class CanvasRecorder:
                 data=self.processing_result['alignment']
                 data['source']=dict(scene=str(bundle/'scene.mp4'),foreground=str(bundle/'foreground.mov'),
                     original=str(bundle/'capture.mp4'),foreground_premultiplied=self.companions[1].alpha_conversion_offloaded,fps=self.fps,width=self.width,height=self.height,audio=self.microphone)
+                data['processing_directory']=str(self.processing_session.directory)
                 data['render_project']=self.render_project
                 data['output_stem']=str(self.path.with_suffix(''))
                 atomic_json(self.path.with_suffix('.alignment.json'),data)
@@ -596,6 +613,9 @@ class CanvasRecorder:
                 except OSError:pass
         finally:
             try:
+                if self.processing_session:
+                    self.processing_session.finish('failed' if self.error or self.processing_error else ('review' if self.awaiting_review else 'complete'))
+                if token is not None:_current.reset(token)
                 if self.frame_count:
                     self.report_path.write_text(json.dumps(self.diagnostic_report(), indent=2), encoding='utf-8')
             except Exception:

@@ -32,6 +32,16 @@ def main():
         app.MainWindow.arrange_windows = lambda self: None
         app.lip_microphone.start = lambda *args, **kwargs: None
         window = app.MainWindow()
+        assert window.window_priority.isChecked()
+        window._apply_window_priority()
+        assert window.out.windowHandle().transientParent()==window.windowHandle()
+        assert window.reader.windowHandle().transientParent()==window.windowHandle()
+        window.window_priority.setChecked(False)
+        assert window.out.windowHandle().transientParent() is None
+        window.window_priority.setChecked(True)
+        results['display_priority_setting']=True
+        assert window.speech_demo.layout().itemAt(1).widget().title()=='Fantasy Name Pronunciation'
+        results['fantasy_pronunciation_location']=True
         window.script.setPlainText('Test text')
         window.font_size.setValue(45)
         window.color_fg = '#ff0000'

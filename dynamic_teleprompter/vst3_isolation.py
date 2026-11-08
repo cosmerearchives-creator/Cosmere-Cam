@@ -1,109 +1,91 @@
-"""Isolated VST3 host. Third-party plugin code never runs in the GUI process.
-
-The host is a spawned Python child that loads Pedalboard and plugin binaries.
-Audio runs over a local multiprocessing pipe (copies blocks, experimental latency).
-"""
-import multiprocessing as mp
-import threading
-import time
-from audio_diagnostics import observe
+"""Local client for the separately executable GPL VST3 host; no Pedalboard import."""
+import base64,importlib.util,json,os,queue,struct,subprocess,sys,threading,time
 from pathlib import Path
+from audio_diagnostics import observe
+_TIMEOUT=.35
+_START_TIMEOUT=8.
+_INSPECTION_TIMEOUT=8.
+_thread_state=threading.local()
+MAX=16*1024*1024
 
-import numpy as np
-
-_TIMEOUT = 0.35
-_START_TIMEOUT = 8.0
-_INSPECTION_TIMEOUT = 8.0
-_thread_state = threading.local()
-
-
-def _host(conn):
-    # Imported only in child: crashes in a plugin must not terminate the UI.
-    from pedalboard import load_plugin
-    instances = {}
-    try:
-        while True:
-            try:
-                message = conn.recv()
-            except EOFError:
-                break
-            op = message[0]
-            if op == 'close':
-                break
-            try:
-                _, path, plugin_name, *rest = message
-                key = (path, plugin_name)
-                if key not in instances:
-                    kw = {'plugin_name': plugin_name} if plugin_name else {}
-                    instances[key] = load_plugin(path, **kw)
-                plugin = instances[key]
-                if op == 'inspect':
-                    details = {}
-                    for name, param in plugin.parameters.items():
-                        value = getattr(param, 'raw_value', None)
-                        if isinstance(value, (str, int, float, bool)):
-                            details[str(name)] = value
-                    conn.send(('ok', details))
-                elif op == 'process':
-                    values, raw = rest
-                    for name, value in (values or {}).items():
-                        param = plugin.parameters.get(name)
-                        if param is not None:
-                            param.raw_value = value
-                    samples = np.frombuffer(raw, dtype='<i2').astype(np.float32) / 32768.0
-                    result = np.asarray(plugin(samples.reshape(1, -1), 48000, reset=False), dtype=np.float32)
-                    if result.ndim == 2:
-                        result = result.mean(axis=0)
-                    result = np.clip(np.nan_to_num(result).reshape(-1), -1, 1)
-                    if len(result) != len(samples):
-                        raise RuntimeError('VST3 changed buffer length unexpectedly')
-                    conn.send(('ok', np.clip(np.rint(result * 32767), -32768, 32767).astype('<i2').tobytes()))
-            except Exception as exc:
-                conn.send(('error', str(exc)))
-    finally:
-        conn.close()
-
+def command():
+    here=Path(__file__).resolve().parent
+    choices=[here/'native/vst3/CosmereVST3Host.exe',Path(sys.executable).parent/'_internal/native/vst3/CosmereVST3Host.exe',here.parent/'dist/CosmereVST3Host/CosmereVST3Host.exe']
+    found=next((str(path) for path in choices if path.is_file()),None)
+    if found:return [found]
+    if not getattr(sys,'frozen',False) and importlib.util.find_spec('pedalboard') is not None:return [sys.executable,str(here/'vst3_worker.py')]
+    raise RuntimeError('The separate VST3 host is not installed.')
+def available():
+    try:command();return True
+    except RuntimeError:return False
 
 class Host:
     def __init__(self):
-        ctx = mp.get_context('spawn')
-        self.conn, child = ctx.Pipe()
-        self.process = ctx.Process(target=_host, args=(child,), daemon=True)
-        self.process.start()
-        child.close()
-        self.first_request = True
-
-    def request(self, msg, timeout):
-        if not self.process.is_alive():
-            raise RuntimeError('VST3 host process exited')
+        self.process=subprocess.Popen(command(),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        import windows_jobs
+        self.job=windows_jobs.contain(self.process)
+        self.lock=threading.Lock();self.replies=queue.Queue(maxsize=4);self.requests=queue.Queue(maxsize=1);self.first_request=True
+        self.reader=threading.Thread(target=self.read,daemon=True);self.writer=threading.Thread(target=self.write,daemon=True)
+        self.reader.start();self.writer.start()
+    def exact(self,n):
+        data=bytearray()
+        while len(data)<n:
+            block=self.process.stdout.read(n-len(data))
+            if not block:raise RuntimeError('VST3 host exited')
+            data.extend(block)
+        return bytes(data)
+    def read(self):
         try:
-            self.conn.send(msg)
-            if not self.conn.poll(max(timeout, _START_TIMEOUT) if self.first_request else timeout):
-                raise TimeoutError('VST3 host timed out')
-            status, result = self.conn.recv()
-            self.first_request = False
-        except (BrokenPipeError, EOFError, OSError) as exc:
-            raise RuntimeError('VST3 host connection lost') from exc
-        if status != 'ok':
-            raise RuntimeError(str(result))
-        return result
-
+            while True:
+                size=struct.unpack('<I',self.exact(4))[0]
+                if size>MAX:raise RuntimeError('VST3 response exceeded limit')
+                self.replies.put(json.loads(self.exact(size)),timeout=.5)
+        except Exception as error:
+            try:self.replies.put_nowait(error)
+            except queue.Full:pass
+    def write(self):
+        while self.process.poll() is None:
+            try:data=self.requests.get(timeout=.1)
+            except queue.Empty:continue
+            try:self.process.stdin.write(data);self.process.stdin.flush()
+            except OSError:return
+    def request(self,msg,timeout):
+        timeout=max(timeout,_START_TIMEOUT) if self.first_request else timeout
+        deadline=time.monotonic()+timeout;acquired=self.lock.acquire(timeout=timeout)
+        try:
+            if not acquired:raise queue.Empty()
+            message=list(msg)
+            if message[0]=='process':message[-1]=base64.b64encode(message[-1]).decode('ascii')
+            payload=json.dumps(message,allow_nan=False).encode('utf-8')
+            if len(payload)>MAX:raise RuntimeError('VST3 request exceeded limit')
+            self.requests.put_nowait(struct.pack('<I',len(payload))+payload)
+            result=self.replies.get(timeout=max(0,deadline-time.monotonic()))
+            if isinstance(result,Exception):raise result
+            self.first_request=False
+            if not result.get('ok'):raise RuntimeError(result.get('error','VST3 error'))
+            value=result['value']
+            return base64.b64decode(value,validate=True) if message[0]=='process' else value
+        except (queue.Empty,queue.Full,OSError,ValueError) as error:
+            self.process.kill();raise RuntimeError('VST3 host timed out or stopped responding') from error
+        finally:
+            if acquired:self.lock.release()
     def close(self):
-        if self.process.is_alive():
-            try:
-                self.conn.send(('close',))
-                self.process.join(0.3)
-            except (OSError, BrokenPipeError):
-                pass
-        if self.process.is_alive():
-            self.process.terminate()
-            self.process.join(0.5)
-        self.conn.close()
-
+        try:
+            if self.process.poll() is None:
+                try:self.request(('close',),.3);self.process.wait(timeout=.5)
+                except Exception:self.process.kill();self.process.wait(timeout=2)
+        finally:
+            self.reader.join(timeout=1);self.writer.join(timeout=1)
+            for pipe,worker in ((self.process.stdin,self.writer),(self.process.stdout,self.reader)):
+                if not worker.is_alive():
+                    try:pipe.close()
+                    except OSError:pass
+            import windows_jobs
+            windows_jobs.release(self.job)
 
 def _get_host():
     host = getattr(_thread_state, 'host', None)
-    if host is None or not host.process.is_alive():
+    if host is None or host.process.poll() is not None:
         if host is not None:
             host.close()
         host = Host()
@@ -143,3 +125,4 @@ def inspect(path, plugin_name=''):
         return host.request(('inspect', str(path), str(plugin_name)), _INSPECTION_TIMEOUT)
     finally:
         host.close()
+

@@ -9,7 +9,7 @@ from pathlib import Path
 def align_script(script, recognized, duration):
     tokens = re.findall(r"\S+", script)
     from edit_pipeline import normalize_word as normalized
-    words = [dict(word=word, start=None, end=None, status='Estimated timing—needs approval',
+    words = [dict(word=word, start=None, end=None, status='Estimated timingâ€”needs approval',
                   needs_approval=True) for word in tokens]
     heard = [item for item in recognized if normalized(item.get('word', ''))]
     matcher = SequenceMatcher(None, [normalized(w) for w in tokens],
@@ -22,7 +22,9 @@ def align_script(script, recognized, duration):
             start, end = max(0., float(item['start'])), min(duration, float(item['end']))
             if end < start:
                 continue
-            words[match.a + offset].update(start=start, end=end, status='Matched speech', needs_approval=False)
+            estimate=bool(item.get('pronunciation_estimate',False))
+            status='Saved pronunciation timing estimate' if estimate else ('Matched saved pronunciation' if item.get('pronunciation_alias') else 'Matched speech')
+            words[match.a + offset].update(start=start,end=end,status=status,needs_approval=estimate)
     cursor = 0
     previous_end = 0.
     while cursor < len(words):
@@ -75,6 +77,9 @@ def kept_segments(duration, silences, internal=False, padding=.15, minimum_pause
 
 
 def run(command, **kwargs):
+    from processing_session import current
+    session=current()
+    if session is not None:return session.run(command,duration=getattr(session,'duration',None),**kwargs)
     try:
         return subprocess.run(command, check=True, capture_output=True, timeout=600,
                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), **kwargs)
@@ -91,15 +96,20 @@ def run(command, **kwargs):
 def recognize_words(source,ffmpeg,model_path,directory):
     from vosk import Model, KaldiRecognizer, SetLogLevel
     import wave
+    from processing_session import current
+    if current():current().begin('Extracting audio for speech alignment')
     audio = Path(directory) / 'alignment.wav'
     run([ffmpeg, '-y', '-hide_banner', '-loglevel', 'error', '-i', str(source),
          '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(audio)])
+    if current():current().begin('Matching recorded speech')
     SetLogLevel(-1)
     recognizer = KaldiRecognizer(Model(str(model_path)), 16000)
     recognizer.SetWords(True)
     recognized = []
     with wave.open(str(audio), 'rb') as stream:
         while True:
+            from processing_session import current
+            if current():current().update(min(99,100*stream.tell()/max(1,stream.getnframes())))
             block = stream.readframes(8000)
             if not block:
                 break
@@ -110,19 +120,29 @@ def recognize_words(source,ffmpeg,model_path,directory):
 
 
 def process_recording(source, ffmpeg, options, script, model_path, duration, directory, progress):
+    from processing_session import current
+    session=current()
+    notify=progress
+    def progress(stage):
+        if session:session.begin(stage);session.duration=duration
+        notify(stage)
     result = dict(options=options, trim_segments=[(0., duration)])
     current = Path(source)
     original_duration=duration
     original_recognized=[];original_cuts=[]
     if options.get('align'):
-        progress('Analyzing speech and restarts before trimming…')
+        progress('Analyzing speech and restarts before trimmingâ€¦')
         original_recognized=recognize_words(current,ffmpeg,model_path,directory)
+        raw_recognized=list(original_recognized)
+        from pronunciations import rewrite_words
+        original_recognized=rewrite_words(original_recognized,options.get('pronunciations',[]),script)
         if options.get('advanced','off')!='off':
+            progress('Searching for retakes…')
             from edit_pipeline import propose_retakes
             original_cuts=propose_retakes(script,original_recognized)
     trim = options.get('trim', 'none')
     if trim != 'none':
-        progress('Detecting silence…')
+        progress('Detecting silenceâ€¦')
         detected = run([ffmpeg, '-hide_banner', '-i', str(current), '-af',
             'silencedetect=noise=-40dB:d=0.35', '-vn', '-f', 'null', '-']).stderr.decode('utf-8', 'replace')
         silences, start = [], None
@@ -140,18 +160,17 @@ def process_recording(source, ffmpeg, options, script, model_path, duration, dir
             segments=[(max(0.,round(a*fps)/fps),min(duration,round(b*fps)/fps)) for a,b in segments]
             segments=[(a,b) for a,b in segments if b>a]
         result['trim_segments'] = segments
+        if session:
+            session.report['trim_plan']=dict(kept_segments=segments,original_duration=original_duration,expected_output_duration=sum(b-a for a,b in segments))
+            session.save()
         if segments != [(0., duration)]:
             if len(segments) > 100:
                 raise RuntimeError('Too many pauses to trim safely; original recording retained')
-            progress('Trimming recording…')
-            filters = []
-            for index, (a, b) in enumerate(segments):
-                filters.extend([f'[0:v]trim=start={a}:end={b},setpts=PTS-STARTPTS[v{index}]',
-                                f'[0:a]atrim=start={a}:end={b},asetpts=PTS-STARTPTS[a{index}]'])
-            inputs = ''.join(f'[v{i}][a{i}]' for i in range(len(segments)))
-            filters.append(inputs + f'concat=n={len(segments)}:v=1:a=1[v][a]')
+            progress('Trimming recordingâ€¦')
+            from edit_pipeline import keep_filter
             graph = Path(directory) / 'trim.ffscript'
-            graph.write_text(';'.join(filters), encoding='utf-8')
+            graph.write_text(keep_filter(segments,audio=True),encoding='utf-8')
+            if session:session.duration=sum(b-a for a,b in segments)
             target = Path(directory) / 'trimmed.mp4'
             run([ffmpeg, '-y', '-hide_banner', '-loglevel', 'error', '-i', str(current),
                 '-/filter_complex', str(graph), '-map', '[v]', '-map', '[a]',
@@ -160,6 +179,7 @@ def process_recording(source, ffmpeg, options, script, model_path, duration, dir
             current = target
             duration = sum(b-a for a,b in segments)
     if options.get('align'):
+        progress('Aligning the full script…')
         from edit_pipeline import map_time
         segments=result['trim_segments']
         recognized=[]
@@ -176,7 +196,7 @@ def process_recording(source, ffmpeg, options, script, model_path, duration, dir
         preferred=[word for word in recognized if not any(cut['start']<=float(word['start'])<cut['end'] for cut in cuts)]
         result['alignment']=align_script(script,preferred,duration)
         result['alignment'].update(recognized=recognized,recognized_original=original_recognized,
-            advanced_mode=options.get('advanced','off'),cuts=cuts,retake_detection_timeline='before_basic_trimming',
+            recognition_raw=raw_recognized,advanced_mode=options.get('advanced','off'),cuts=cuts,retake_detection_timeline='before_basic_trimming',
             original_duration=original_duration)
         result['retake_proposals']=len(cuts)
     return current,result
