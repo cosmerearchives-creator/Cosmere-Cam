@@ -817,7 +817,7 @@ def draw_media_layers(painter, layers, canvas_size, foreground=False):
         painter.setOpacity(max(0., min(1., float(layer.get('opacity', 100))/100)))
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         reuse=sum(1 for entry in layers if entry.get('visible',True) and entry.get('path')==path and float(entry.get('scale',1))==scale)>1
-        if reuse:
+        if reuse or foreground:
             key=(int(pix.cacheKey()),target_width,target_height)
             scaled=SCALED_MEDIA_PIXMAP_CACHE.get(key)
             if scaled is None:

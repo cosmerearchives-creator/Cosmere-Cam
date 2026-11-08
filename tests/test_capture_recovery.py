@@ -82,6 +82,18 @@ class Recovery(unittest.TestCase):
             finally:r.finished=True;worker.join(1)
             r.abort();self.assertFalse(target.exists())
 
+    def test_timing_catchup_is_one_batch_with_prior_frame_then_latest(self):
+        import io
+        from types import SimpleNamespace
+        r=CanvasRecorder('unused.mp4',4,4,30,microphone=False)
+        previous=QImage(4,4,QImage.Format.Format_ARGB32_Premultiplied);previous.fill(QColor('blue'))
+        latest=QImage(4,4,previous.format());latest.fill(QColor('red'));r._last_bytes=previous
+        with patch.object(r,'frames_due',return_value=31):r.push_frame(latest)
+        self.assertIsNone(r.error);self.assertEqual(r._frames.qsize(),1);self.assertEqual(r.frame_count,31)
+        output=io.BytesIO();r._video=SimpleNamespace(stdin=output);r._frames.put(None);r._write_frames()
+        payload=output.getvalue();self.assertEqual(r.encoder_writes,31);self.assertEqual(len(payload),31*64)
+        self.assertEqual(payload[:4],bytes([255,0,0,255]));self.assertEqual(payload[-4:],bytes([0,0,255,255]))
+
     def test_pause_rejects_capture_without_waiting_for_device_close(self):
         r=CanvasRecorder('unused.mp4',64,64,10);r._started=time.monotonic();r._stream=Mock()
         r.pause_capture();self.assertTrue(r.stopping);r._stream.stop.assert_not_called()

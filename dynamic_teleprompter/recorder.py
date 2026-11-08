@@ -236,54 +236,45 @@ class CanvasRecorder:
             self.late_frames += due - 1
         if due > 1 and self._last_bytes:
             self.duplicate_frames += due - 1
-        for i in range(due):
-            # If capture is behind schedule duplicate the prior frame, preserving time.
-            pixels = self._last_bytes if i < due - 1 and self._last_bytes else data
-            try:
-                self._frames.put_nowait(pixels)
+        if due:
+            # A timing catch-up is one bounded batch, not dozens of identical
+            # queue entries. Pixel ownership remains bounded by distinct frames.
+            packet=SimpleNamespace(pixels=data,previous=self._last_bytes,count=due)
+            try:self._frames.put_nowait(packet)
             except queue.Full:
-                self.error = 'Video encoder cannot keep up; stopped instead of producing a shortened recording.'
+                self.error='Video encoder cannot keep up; stopped instead of producing a shortened recording.'
                 return
-            self.frame_count += 1
-            self.peak_queue_depth = max(self.peak_queue_depth, self._frames.qsize())
+            self.frame_count+=due
+            self.peak_queue_depth=max(self.peak_queue_depth,self._frames.qsize())
         self._last_bytes = data
         if self.packed:
             for track in self.companions:track.frame_count=self.frame_count
 
     def _write_frames(self):
         try:
-            last_key=None;last_pixels=None;last_image=None
             while not self.cancelled:
-                pixels = self._frames.get()
-                if pixels is None:
-                    break
-                self._encoder_pending_since=time.monotonic()
-                write_started = time.perf_counter()
-                if isinstance(pixels,tuple):
-                    # Each plane occupies exactly one canvas-height of the packed frame.
-                    # QImage ownership keeps its zero-copy buffer alive through the write.
-                    for plane in pixels:
-                        native=plane.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
-                        self._video.stdin.write(native.constBits())
-                    pixels=None
-                if isinstance(pixels,QImage):
-                    key=pixels.cacheKey()
-                    if key!=last_key:
-                        # QuickTime alpha tracks use straight alpha. Keep the mode explicit
-                        # instead of relying on FFmpeg-version-specific auto conversions.
+                packet=self._frames.get()
+                if packet is None:break
+                for index in range(packet.count):
+                    if self.cancelled:break
+                    pixels=packet.previous if index<packet.count-1 and packet.previous is not None else packet.pixels
+                    self._encoder_pending_since=time.monotonic()
+                    started=time.perf_counter()
+                    if isinstance(pixels,tuple):
+                        for plane in pixels:
+                            native=plane.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+                            self._video.stdin.write(native.constBits())
+                    else:
                         pixel_format=QImage.Format.Format_ARGB32 if self.alpha and not self.alpha_conversion_offloaded else QImage.Format.Format_ARGB32_Premultiplied
-                        last_image=pixels.convertToFormat(pixel_format)
-                        last_pixels=last_image.constBits();last_key=key
-                    pixels=last_pixels
-                if pixels is not None:self._video.stdin.write(pixels)
-                elapsed_ms = (time.perf_counter() - write_started) * 1000
-                self._encoder_pending_since=0.
-                self.encoder_writes += 1
-                self.encoder_write_total_ms += elapsed_ms
-                self.encoder_write_max_ms = max(self.encoder_write_max_ms, elapsed_ms)
+                        native=pixels.convertToFormat(pixel_format)
+                        self._video.stdin.write(native.constBits())
+                    elapsed=(time.perf_counter()-started)*1000
+                    self._encoder_pending_since=0.
+                    self.encoder_writes+=1
+                    self.encoder_write_total_ms+=elapsed
+                    self.encoder_write_max_ms=max(self.encoder_write_max_ms,elapsed)
         except Exception as exc:
-            if not self.cancelled:
-                self.error = 'Video writing failed: ' + str(exc)
+            if not self.cancelled:self.error='Video writing failed: '+str(exc)
 
     def _process_audio(self):
         """Continuous audio DSP off the PortAudio callback; playback receives same PCM."""
