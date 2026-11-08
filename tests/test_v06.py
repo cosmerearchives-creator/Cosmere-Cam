@@ -24,7 +24,7 @@ class PortableProjects(unittest.TestCase):
             with zipfile.ZipFile(target) as archive:archive.extractall(extracted)
             loaded,warnings=load_exported_project(extracted)
             self.assertFalse(warnings);self.assertEqual(loaded['script'],data['script'])
-            for layer in loaded['settings']['media_layers']:self.assertTrue(Path(layer['path']).is_file());self.assertTrue(Path(layer['path']).is_relative_to(extracted))
+            for layer in loaded['settings']['media_layers']:self.assertTrue(Path(layer['path']).is_file());self.assertTrue(Path(layer['path']).resolve().is_relative_to(extracted.resolve()))
             model=Path(loaded['model_library'][0]['path']);self.assertTrue((model.parent/'texture.png').is_file())
             self.assertEqual(loaded['settings']['media_layers'][1]['movement']['direction_models']['left'],str(model))
             self.assertFalse(loaded['settings']['audio_chain'][0]['enabled']);self.assertEqual(loaded['settings']['audio_chain'][0]['path'],'example.dll')
@@ -101,6 +101,16 @@ class UiPlanningFeatures(unittest.TestCase):
         for word in ('doesn’t','wouldn’t','there’s','didn’t','that’s','it’s'):self.assertFalse(proof.misspelled(word))
         self.assertTrue(proof.misspelled('zznonexistentwordzz'))
         editor.close();child.close();parent.close();qt.processEvents()
+    def test_name_listener_finishes_before_other_microphone_work(self):
+        from unittest.mock import Mock,patch
+        from app import MainWindow
+        window=Mock();window.pronunciation_panel.worker.isRunning.return_value=True
+        window.pronunciation_panel.worker.wait.return_value=True
+        self.assertTrue(MainWindow._stop_name_listener(window));window.pronunciation_panel.stop.assert_called_once()
+        window.pronunciation_panel.worker.wait.return_value=False
+        with patch('app.QMessageBox.information') as warning:
+            self.assertFalse(MainWindow._stop_name_listener(window));warning.assert_called_once()
+
     def test_disabled_vst2_effect_is_not_prepared_at_startup(self):
         from unittest.mock import patch
         from PySide6.QtWidgets import QApplication,QWidget

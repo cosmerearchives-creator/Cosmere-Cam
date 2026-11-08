@@ -10,6 +10,7 @@ class PronunciationPanel(QGroupBox):
         note=QLabel('Type the correct name, then say only that name a few times, pausing between attempts. Confirm what the recognizer hears; no phonetic spelling is needed.');note.setWordWrap(True);box.addWidget(note)
         self.name=QLineEdit();self.name.setPlaceholderText('Correct name, for example Dalinar');box.addWidget(self.name)
         self.heard=QLineEdit();self.heard.setPlaceholderText('Recognized alternatives appear here; separate alternatives with semicolons');box.addWidget(self.heard)
+        self.name.textEdited.connect(lambda _:self.heard.clear())
         row=QHBoxLayout();self.listen=QPushButton('Listen');self.listen.clicked.connect(self.toggle);row.addWidget(self.listen)
         commit=QPushButton('Confirm and Save');commit.clicked.connect(self.commit);row.addWidget(commit);box.addLayout(row)
         self.status=QLabel('Ready. Saved examples help voice following and recorded-word alignment.');self.status.setWordWrap(True);box.addWidget(self.status)
@@ -30,8 +31,8 @@ class PronunciationPanel(QGroupBox):
         if not self.window._voice_model_available():self.status.setText('Install or choose an offline English speech model first.');return
         from app import VoiceWorker
         self.worker=VoiceWorker(self.window.microphones.currentData(),'',self.window.local_settings.value('voice_model_path','',type=str) or None)
-        worker=self.worker;self.listen.setText('Stop listening');self.status.setText('Listening. Say the name alone, pause, and repeat.')
-        worker.recognized.connect(self.receive);worker.failed.connect(self.status.setText);worker.finished.connect(lambda:self.listen.setText('Listen'))
+        worker=self.worker;self.name.setEnabled(False);self.names.setEnabled(False);self.listen.setText('Stop listening');self.status.setText('Listening. Say the name alone, pause, and repeat.')
+        worker.recognized.connect(self.receive);worker.failed.connect(self.status.setText);worker.finished.connect(lambda:(self.listen.setText('Listen'),self.name.setEnabled(True),self.names.setEnabled(True)))
         worker.start();QTimer.singleShot(30000,lambda:worker.stop() if worker.isRunning() else None)
     def receive(self,text,final):
         if not final or not text.strip():return

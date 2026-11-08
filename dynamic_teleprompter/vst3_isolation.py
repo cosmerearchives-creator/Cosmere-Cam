@@ -23,7 +23,9 @@ class Host:
     def __init__(self):
         self.process=subprocess.Popen(command(),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         import windows_jobs
-        self.job=windows_jobs.contain(self.process)
+        try:self.job=windows_jobs.contain(self.process)
+        except Exception:
+            self.process.kill();self.process.wait(timeout=2);raise
         self.lock=threading.Lock();self.replies=queue.Queue(maxsize=4);self.requests=queue.Queue(maxsize=1);self.first_request=True
         self.reader=threading.Thread(target=self.read,daemon=True);self.writer=threading.Thread(target=self.write,daemon=True)
         self.reader.start();self.writer.start()

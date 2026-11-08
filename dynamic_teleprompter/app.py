@@ -2809,7 +2809,17 @@ class MainWindow(QMainWindow):
             self.recorder.audio_chain = self._audio_chain_snapshot()
             self.recorder.audio_clip_drive = self.audio_clip_drive.value()
 
+    def _stop_name_listener(self):
+        worker=self.pronunciation_panel.worker
+        if worker is not None and worker.isRunning():
+            self.pronunciation_panel.stop()
+            if not worker.wait(1600):
+                QMessageBox.information(self,'Microphone busy','The name listener is finishing. Wait a moment, then retry.')
+                return False
+        return True
+
     def _toggle_recording(self):
+        if self.recorder is None and not self._stop_name_listener():return
         if self.recorder is not None:
             self._stop_recording()
             return
@@ -4137,6 +4147,7 @@ class MainWindow(QMainWindow):
         self.animation_test_status.setText('Showing sample animation in separate preview window.')
 
     def start_animation_test(self):
+        if not self._stop_name_listener():return
         self.stop_animation_test()
         if not self._voice_model_available():
             QMessageBox.information(self, 'Speech model required',
@@ -4428,6 +4439,7 @@ class MainWindow(QMainWindow):
         self.update_model_status()
 
     def toggle_listening(self, preserve_presentation=False):
+        if not self._stop_name_listener():return
         if self.voice_worker is not None and self.voice_worker.isRunning():
             self.stop_listening()
             return
@@ -5287,7 +5299,8 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self.pronunciation_panel.stop()
-        if self.pronunciation_panel.worker is not None:self.pronunciation_panel.worker.wait(1600)
+        if self.pronunciation_panel.worker is not None and not self.pronunciation_panel.worker.wait(1600):
+            QMessageBox.information(self,'Microphone busy','Wait for the name listener to finish before exiting.');event.ignore();return
         self._save_session()
         self._session_timer.stop()
         self.stop_animation_test()
