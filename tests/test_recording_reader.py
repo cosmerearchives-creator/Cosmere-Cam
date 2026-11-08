@@ -170,7 +170,9 @@ class DiscardTests(unittest.TestCase):
             r._video = Mock()
             r._video.returncode = 0
             r._video.communicate.return_value = (b'',b'')
-            r._finish()
+            r._ffmpeg=r._capture_ffmpeg='capture.exe'
+            with patch('recorder.resolve_processing_ffmpeg',return_value='processing.exe'):
+                r._finish()
             self.assertIsNone(r.error)
             self.assertEqual(r.path.read_bytes(), b'encoded video')
             self.assertTrue(r.report_path.exists())

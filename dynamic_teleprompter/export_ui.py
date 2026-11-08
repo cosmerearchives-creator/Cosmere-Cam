@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread,Signal,QTimer,QUrl,Qt
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QDialog,QVBoxLayout,QLabel,QProgressBar,QPushButton,QMessageBox
-from recorder import resolve_ffmpeg
+from recorder import resolve_processing_ffmpeg
 from edit_pipeline import caption_events,write_concat,export_videos
 
 class ExportWorker(QThread):
@@ -56,7 +56,7 @@ class ExportDialog(QDialog):
             if self.position>=len(self.events):
                 self.timer.stop();self.canvas.close();self.canvas=None
                 concat=self.work/'captions.ffconcat';write_concat(self.events,self.images,self.data['duration'],concat)
-                ffmpeg=resolve_ffmpeg()
+                ffmpeg=resolve_processing_ffmpeg()
                 if not ffmpeg:raise RuntimeError('FFmpeg is unavailable.')
                 stem=self.data.get('output_stem') or str(self.review_path.with_suffix(''))
                 self.worker=ExportWorker(self.data,concat,stem,self.work,ffmpeg,self,session=self.session)
