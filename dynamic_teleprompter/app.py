@@ -527,12 +527,13 @@ class ContinuousVideoDecoder:
     """Persistent FFmpeg decoder on a worker thread, with a latest-frame buffer.
 
     Each decoder is paced using source FPS on a monotonic clock. It never creates
-    a QPixmap outside Qt's GUI thread. Frames are RGB24 and are copied before
+    a QPixmap outside Qt's GUI thread. Frames are BGRA32 and are copied before
     crossing the thread boundary. Looping restarts the decoder at EOF.
     """
-    def __init__(self, path, ffmpeg, loop, decode_limit=720):
+    def __init__(self, path, ffmpeg, loop, decode_limit=720, canvas_bounds=None):
         self.path, self.ffmpeg, self.loop = path, ffmpeg, loop
         self.decode_limit = decode_limit
+        self.canvas_bounds=canvas_bounds
         self.lock = threading.Lock()
         self.latest = None
         self.serial = 0
@@ -584,15 +585,17 @@ class ContinuousVideoDecoder:
         # Cap decoded size for interactive composition; keep source aspect ratio.
         # Limit maximum height and preserve aspect ratio; 720p is default.
         scale = min(1., (self.decode_limit * 16 / 9)/max(1,source_w), self.decode_limit/max(1,source_h))
-        width = max(2, (int(source_w * scale)//2)*2)
-        height = max(2, (int(source_h * scale)//2)*2)
+        if self.canvas_bounds:
+            scale=min(scale,self.canvas_bounds[0]/max(1,source_w),self.canvas_bounds[1]/max(1,source_h))
+        width=max(2,round(source_w*scale/2)*2)
+        height=max(2,round(source_h*scale/2)*2)
         self.width, self.height = width, height
-        length = width * height * 3
+        length = width * height * 4
         interval = 1. / fps
         while self.running:
             cmd = [self.ffmpeg, '-nostdin', '-hide_banner', '-loglevel', 'error',
-                   '-i', self.path, '-an', '-sn', '-vf', f'fps={fps:.6f},scale={width}:{height}',
-                   '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
+                   '-threads','1','-filter_threads','1','-i', self.path, '-an', '-sn', '-vf', f'fps={fps:.6f},scale={width}:{height}',
+                   '-f', 'rawvideo', '-pix_fmt', 'bgra','-threads','1','pipe:1']
             try:
                 self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -640,14 +643,16 @@ class VideoFrameCache:
         self.decoders = {}
         self.cache = {}
 
-    def frame(self, layer, ffmpeg):
+    def frame(self, layer, ffmpeg, canvas_size=None):
         if not ffmpeg: return QPixmap()
         path = str(layer.get('path', ''))
         if not Path(path).is_file(): return QPixmap()
-        key = (path, bool(layer.get('loop', True)), ffmpeg, VIDEO_DECODE_LIMIT)
+        scale=max(.01,float(layer.get('scale',1)))
+        bounds=tuple(max(2,round(value*scale)) for value in canvas_size) if canvas_size else None
+        key = (path, bool(layer.get('loop', True)), ffmpeg, VIDEO_DECODE_LIMIT,bounds)
         decoder = self.decoders.get(key)
         if decoder is None:
-            decoder = ContinuousVideoDecoder(path, ffmpeg, bool(layer.get('loop', True)), VIDEO_DECODE_LIMIT)
+            decoder = ContinuousVideoDecoder(path, ffmpeg, bool(layer.get('loop', True)), VIDEO_DECODE_LIMIT,bounds)
             self.decoders[key] = decoder
         decoder.last_used = time.monotonic()
         with decoder.lock:
@@ -656,7 +661,7 @@ class VideoFrameCache:
         cached = self.cache.get(key)
         if cached and cached[0] == serial: return cached[1]
         if payload is None or width < 2 or height < 2: return cached[1] if cached else QPixmap()
-        image = QImage(payload, width, height, width*3, QImage.Format.Format_RGB888).copy()
+        image = QImage(payload, width, height, width*4, QImage.Format.Format_RGB32)
         pix = QPixmap.fromImage(image)
         self.cache[key] = (serial, pix)
         if len(self.decoders) > 8:
@@ -801,7 +806,7 @@ def draw_media_layers(painter, layers, canvas_size, foreground=False):
             draw_live2d(painter, layer, canvas_size)
             continue
         path = layer.get('path', '')
-        pix = (VIDEO_FRAMES.frame(layer, resolve_ffmpeg(VIDEO_FFMPEG_PATH)) if layer.get('type') == 'video'
+        pix = (VIDEO_FRAMES.frame(layer, resolve_ffmpeg(VIDEO_FFMPEG_PATH),canvas_size) if layer.get('type') == 'video'
                else source_image_pixmap(path))
         if pix.isNull():
             continue
@@ -817,7 +822,7 @@ def draw_media_layers(painter, layers, canvas_size, foreground=False):
         painter.setOpacity(max(0., min(1., float(layer.get('opacity', 100))/100)))
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         reuse=sum(1 for entry in layers if entry.get('visible',True) and entry.get('path')==path and float(entry.get('scale',1))==scale)>1
-        if reuse:
+        if reuse or foreground:
             key=(int(pix.cacheKey()),target_width,target_height)
             scaled=SCALED_MEDIA_PIXMAP_CACHE.get(key)
             if scaled is None:

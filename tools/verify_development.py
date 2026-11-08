@@ -239,6 +239,8 @@ def main():
         assert fps >= 20, fps
         assert len(app.VIDEO_FRAMES.decoders) == 2
         assert all(decoder.serial >= 30 for decoder in app.VIDEO_FRAMES.decoders.values())
+        assert all((decoder.width,decoder.height)==(1080,608) for decoder in app.VIDEO_FRAMES.decoders.values())
+        assert all(len(decoder.latest)==decoder.width*decoder.height*4 for decoder in app.VIDEO_FRAMES.decoders.values())
         results['two_video_synthetic_model_canvas_fps'] = round(fps,2)
         results['canvas_call_mean_ms'] = round(sum(samples)/len(samples),2)
         results['video_source_resolution'] = [1280,720]
@@ -252,10 +254,15 @@ def main():
         window.out.capture_editable=True
         editable=CanvasRecorder(temp/'editable-benchmark.mp4',1080,1920,30,microphone=False,editable=True)
         editable.start();window.out.capture_owner=editable;start=time.monotonic();captures=0;capture_costs=[]
+        import cProfile,pstats
+        render_profile=cProfile.Profile()
         while time.monotonic()-start<10.0:
             if editable.frames_due()>0:
                 tick=time.perf_counter()
+                profile_this=captures%20==0
+                if profile_this:render_profile.enable()
                 window.out.render_frame(force=True)
+                if profile_this:render_profile.disable()
                 rendered_at=time.perf_counter()
                 editable.push_frame(window.out._snapshot,window.out.editable_background,window.out.editable_foreground)
                 capture_costs.append(((rendered_at-tick)*1000,(time.perf_counter()-rendered_at)*1000))
@@ -273,6 +280,7 @@ def main():
         print('Editable source capture profile:',captures/elapsed,'FPS; render/push ms',np.mean(capture_costs,axis=0),'CPU count',os.cpu_count(), 'canvas stages',window.out.render_stages,flush=True)
         if captures/elapsed<20:
             live.close_render_workers();app.VIDEO_FRAMES.shutdown()
+        if captures/elapsed<20:pstats.Stats(render_profile).sort_stats('cumtime').print_stats(18)
         assert captures/elapsed>=20, captures/elapsed
         results['editable_capture_mb_per_second']=round(editable.capture_bytes/elapsed/1_000_000,2)
         assert editable.capture_bytes/elapsed<30_000_000, 'Editable capture disk rate regression'
