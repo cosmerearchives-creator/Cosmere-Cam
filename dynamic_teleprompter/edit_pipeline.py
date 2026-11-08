@@ -172,8 +172,12 @@ def keep_filter(segments,audio=True):
     for start,end in segments:
         if not math.isfinite(start+end) or start<previous or end<=start:raise ValueError('Invalid trim sections.')
         previous=end
-    select='+'.join(f'gte(t,{a:.9f})*lt(t,{b:.9f})' for a,b in segments)
-    gaps=[f'gte(T,{segments[i][0]:.9f})*{segments[i][0]-segments[i-1][1]:.9f}' for i in range(1,len(segments))]
+    # Decimal serialization must not exclude a frame exactly on a 1/30s
+    # boundary or include the end frame. The same tiny tolerance must also
+    # trigger its timestamp offset, otherwise that first frame can go backwards.
+    epsilon=1e-7
+    select='+'.join(f'gte(t,{a-epsilon:.9f})*lt(t,{b-epsilon:.9f})' for a,b in segments)
+    gaps=[f'gte(T,{segments[i][0]-epsilon:.9f})*{segments[i][0]-segments[i-1][1]:.9f}' for i in range(1,len(segments))]
     offset='+'.join(gaps) or '0'
     filters=[f"[0:v]select='{select}',setpts='PTS-STARTPTS-({offset})/TB'[v]"]
     if audio:

@@ -32,18 +32,30 @@ class ProcessingRuntime(unittest.TestCase):
             self.assertTrue(report['post_processing']['ffmpeg_selection']['bundled'])
 
 class LongTrim(unittest.TestCase):
+    def test_fractional_start_and_end_keep_exact_frame_count(self):
+        from edit_pipeline import cut_media
+        import imageio_ffmpeg
+        ffmpeg=recorder.resolve_processing_ffmpeg()
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);source=root/'frames.mp4';target=root/'trim.mp4'
+            subprocess.run([ffmpeg,'-y','-v','error','-f','lavfi','-i','testsrc2=size=64x64:rate=30:duration=1','-c:v','libx264','-preset','ultrafast',str(source)],capture_output=True,check=True,timeout=10)
+            cut_media(source,target,[(2/30,10/30)],ffmpeg,root,audio=False)
+            reader=imageio_ffmpeg.read_frames(str(target),pix_fmt='rgb24');next(reader);count=sum(1 for _ in reader);reader.close()
+            self.assertEqual(count,8)
+
     def test_three_minute_rgb_aac_take_with_widely_spaced_cuts(self):
         from edit_pipeline import cut_media
         from processing_session import ProcessingSession,active
         import imageio_ffmpeg
         ffmpeg=recorder.resolve_processing_ffmpeg('external-development-build.exe')
         with tempfile.TemporaryDirectory() as folder:
-            root=Path(folder);source=root/'rgb.mkv';target=root/'trim.mp4'
+            root=Path(folder);source=root/'rgb.mp4';target=root/'trim.mp4'
             # Long input timelines reproduce scheduler/buffering issues that a
             # four-second many-cut fixture cannot cover. No user media or timings.
             subprocess.run([ffmpeg,'-y','-v','error','-f','lavfi','-i','testsrc2=size=160x120:rate=30:duration=204',
                 '-f','lavfi','-i','sine=frequency=700:sample_rate=48000:duration=204','-c:v','libx264rgb','-preset','ultrafast','-crf','0','-threads:v','1','-c:a','aac',str(source)],capture_output=True,check=True,timeout=30)
-            segments=[(2.,65.),(68.,71.),(75.,117.),(121.,124.),(128.,131.),(133.,136.),(140.,169.),(174.,177.),(180.,198.),(202.,204.)]
+            frame_spans=[(61,1961),(2071,2134),(2252,3511),(3631,3722),(3842,3931),(3991,4082),(4202,5071),(5221,5312),(5402,5941),(6061,6120)]
+            segments=[(a/30,b/30) for a,b in frame_spans]
             expected=sum(b-a for a,b in segments)
             session=ProcessingSession(root/'processing');session.begin('Long recording trimming');session.duration=expected
             # A regression is a test failure; never let CI wait the production
