@@ -145,11 +145,11 @@ class CanvasRecorder:
         if self.packed:
             self._silent=Path(self._temp.name)/'packed.mkv'
             self._packed_source=self._silent
-            command=[ffmpeg,'-y','-hide_banner','-loglevel','error','-filter_complex_threads','1','-f','rawvideo','-pixel_format','bgra',
+            command=[ffmpeg,'-y','-hide_banner','-loglevel','error','-filter_complex_threads','2','-f','rawvideo','-pixel_format','bgra',
                      '-probesize','32','-analyzeduration','0','-video_size',f'{self.width}x{self.height*3}','-framerate',str(self.fps),'-i','pipe:0',
                      '-filter_complex',f'[0:v]split=2[color][mask];[mask]crop={self.width}:{self.height}:0:{self.height*2},alphaextract[alpha]',
-                     '-map','[color]','-c:v:0','libx264','-preset:v:0','ultrafast','-crf:v:0','18','-pix_fmt:v:0','yuv420p','-threads:v:0','2',
-                     '-map','[alpha]','-c:v:1','ffv1','-pix_fmt:v:1','gray','-threads:v:1','1',str(self._silent)]
+                     '-map','[color]','-c:v:0','libx264','-preset:v:0','ultrafast','-crf:v:0','18','-pix_fmt:v:0','yuv420p','-threads:v:0','4','-tune:v:0','zerolatency',
+                     '-map','[alpha]','-c:v:1','libx264','-preset:v:1','ultrafast','-tune:v:1','zerolatency','-qp:v:1','0','-pix_fmt:v:1','gray','-color_range:v:1','pc','-threads:v:1','1',str(self._silent)]
             for name,alpha in [('background.mp4',False),('foreground.mov',True)]:
                 track=SimpleNamespace(path=Path(self._temp.name)/name,alpha=alpha,frame_count=0,error=None,finished=False,
                     alpha_conversion_offloaded=True,encoder_write_total_ms=0.,encoder_writes=0,peak_queue_depth=0)
