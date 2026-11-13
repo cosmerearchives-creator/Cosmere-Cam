@@ -510,12 +510,13 @@ class CanvasRecorder:
                 command+=[str(self.companions[1].path)]
                 run_media(command)
                 self._silent=captured
+            manual_review = self.processing_options.get('manual_review', False)
             ready = self._silent.with_name('ready.mp4')
             if self.microphone and self._wave.exists() and self._wave.stat().st_size > 44:
                 command = [self._ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
                            '-i', str(self._silent), '-i', str(self._wave),
                            '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac',
-                           '-b:a', '160k', '-shortest', '-movflags', '+faststart', str(ready)]
+                           '-b:a', '160k'] + (['-t', str(self.frame_count / self.fps)] if manual_review else ['-shortest']) + ['-movflags', '+faststart', str(ready)]
                 self.processing_session.begin('Combining video and audio')
                 self.processing_session.run(command,duration=self.frame_count/self.fps)
             else:
@@ -537,15 +538,15 @@ class CanvasRecorder:
                 self.processing_options={**self.processing_options,'align':False,'advanced':'off'}
             selected = ready
             editable_ready=None
-            if self.companions and not self.editable_failed and self.processing_options.get('align'):
+            if self.companions and not self.editable_failed and (manual_review or self.processing_options.get('align')):
                 editable_ready=ready.with_name('editable.mp4')
-                if self.microphone and self._wave.exists():
+                if self.microphone and self._wave.exists() and self._wave.stat().st_size > 44:
                     self.processing_session.run([self._ffmpeg,'-y','-v','error','-i',str(self.companions[0].path),'-i',str(self._wave),
-                        '-map','0:v','-map','1:a','-c:v','copy','-c:a','aac','-shortest',str(editable_ready)],
+                        '-map','0:v','-map','1:a','-c:v','copy','-c:a','aac'] + (['-t', str(self.frame_count / self.fps)] if manual_review else ['-shortest']) + [str(editable_ready)],
                         check=True,capture_output=True,timeout=180,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                 else:shutil.copyfile(self.companions[0].path,editable_ready)
                 selected=editable_ready
-            if self.processing_options:
+            if self.processing_options and not manual_review:
                 try:
                     from recording_processing import process_recording
                     selected, self.processing_result = process_recording(selected, self._ffmpeg,
@@ -555,6 +556,29 @@ class CanvasRecorder:
                 except Exception as exc:
                     self.processing_error = str(exc)
                     selected = ready  # Optional processing must never destroy a take.
+            if manual_review:
+                selected = ready
+                if editable_ready is not None:
+                    self.processing_session.begin('Saving editable tracks for Review & Cut')
+                    from update_core import atomic_json
+                    bundle = self.path.with_suffix('.take')
+                    with tempfile.TemporaryDirectory(prefix='.' + self.path.stem + '-', dir=self.path.parent) as folder:
+                        stage = Path(folder)
+                        shutil.copyfile(editable_ready, stage / 'scene.mp4')
+                        shutil.copyfile(self.companions[1].path, stage / 'foreground.mov')
+                        os.replace(stage, bundle)
+                    data = dict(schema=1, kind='cut_review', script=self.script,
+                                duration=self.frame_count / self.fps, render_project=self.render_project,
+                                model_path=str(self.model_path), pronunciations=getattr(self, 'pronunciations', []),
+                                output_stem=str(self.path.with_suffix('')),
+                                processing_directory=str(self.processing_session.directory),
+                                source=dict(scene=str(bundle / 'scene.mp4'), original=str(self.path),
+                                            foreground=str(bundle / 'foreground.mov'),
+                                            foreground_premultiplied=self.companions[1].alpha_conversion_offloaded,
+                                            fps=self.fps, width=self.width, height=self.height,
+                                            audio=self.microphone and self._wave.exists() and self._wave.stat().st_size > 44))
+                else:
+                    self.processing_error = self.processing_error or 'Editable tracks are unavailable.'
             if 'alignment' in self.processing_result and editable_ready is not None:
                 self.processing_session.begin('Preparing review sources')
                 from edit_pipeline import cut_media, publish_file
@@ -591,6 +615,10 @@ class CanvasRecorder:
                 os.replace(staged, self.path)
             finally:
                 Path(staged).unlink(missing_ok=True)
+            if manual_review and editable_ready is not None:
+                atomic_json(self.path.with_suffix('.cuts.json'), data)
+                self.processing_result['manual_review'] = data
+                self.awaiting_review = True
             if 'alignment' in self.processing_result:
                 from update_core import atomic_json
                 atomic_json(self.path.with_suffix('.alignment.json'), self.processing_result['alignment'])

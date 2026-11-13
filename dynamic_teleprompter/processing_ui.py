@@ -35,6 +35,7 @@ class RecordingProgress(QDialog):
         if self.recorder.finished:
             self.timer.stop();self.bar.setRange(0,100)
             if self.recorder.error or self.recorder.processing_error:self.stage.setText('Processing stopped. Original or recovery take retained.');self.bar.setValue(0)
+            elif 'manual_review' in self.recorder.processing_result:self.stage.setText('Ready to review and cut');self.bar.setValue(100)
             elif self.recorder.awaiting_review:self.stage.setText('Waiting for your word-timing review');self.bar.setValue(100)
             else:self.stage.setText('Recording saved');self.bar.setValue(100)
 
@@ -245,7 +246,7 @@ class AlignmentReview(QDialog):
         except ValueError as error:
             QMessageBox.information(self,'Approval needed',str(error));self.next_section();return
         stem=self.data.get('output_stem',str(self.path.with_suffix('')))
-        targets=[Path(stem+'_baseline.mp4')]
+        targets=[Path(stem+'_edited.mp4' if self.data.get('kind') == 'manual_cut' else stem+'_baseline.mp4')]
         if self.data.get('advanced_mode','off')!='off':targets.append(Path(stem+'_edited.mp4'))
         if any(path.exists() for path in targets):
             if QMessageBox.question(self,'Replace previous exports?','Replace the previous exports for this take? The source take will be retained.',
@@ -263,13 +264,13 @@ class AlignmentReview(QDialog):
         self.preview_dialog.show()
 
     def reject(self):
-        if self.export_dialog is not None and self.export_dialog.worker is not None and self.export_dialog.worker.isRunning():
+        if self.export_dialog is not None and (self.export_dialog.timer.isActive() or (self.export_dialog.worker is not None and self.export_dialog.worker.isRunning())):
             self.export_dialog.raise_();return
         if self.save():
             super().reject()
 
     def closeEvent(self, event):
-        if self.export_dialog is not None and self.export_dialog.worker is not None and self.export_dialog.worker.isRunning():
+        if self.export_dialog is not None and (self.export_dialog.timer.isActive() or (self.export_dialog.worker is not None and self.export_dialog.worker.isRunning())):
             self.export_dialog.raise_();event.ignore();return
         if self.save():
             event.accept()

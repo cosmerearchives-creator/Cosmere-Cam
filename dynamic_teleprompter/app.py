@@ -2890,7 +2890,7 @@ class MainWindow(QMainWindow):
                 if self.voice_worker is not None:
                     self.voice_worker.reset_recognition()
                 self.next()
-            self.out.capture_editable = self.keep_editable.isChecked()
+            self.out.capture_editable = True
             self.out._dirty = True
             self.render()
             directory = Path(self.record_dir)
@@ -2906,7 +2906,7 @@ class MainWindow(QMainWindow):
                                             audio_gate_enabled=any(e['type'] == 'gate' and e['enabled'] for e in self._audio_chain_snapshot()),
                                             audio_chain=self._audio_chain_snapshot(),
                                             audio_clip_drive=self.audio_clip_drive.value(),
-                                            editable=self.keep_editable.isChecked())
+                                            editable=True)
             if self.audio_monitor is not None:
                 self._stop_monitor(keep_checkbox=True)
             lip_microphone.stop()
@@ -2914,13 +2914,12 @@ class MainWindow(QMainWindow):
             self.recorder.script = self.script.toPlainText()
             self.recorder.pronunciations=list(self.pronunciation_entries)
             self.recorder.render_project = self._project_payload()
-            self.recorder.render_project['groups'] = list(self.groups)
+            self.recorder.render_project['groups'] = groups_from_script(self.recorder.script, self.grouping.currentText(), self.group_limit.value(), self.chars.value(), self.lines.value())
             self.recorder.model_path = self.local_settings.value('voice_model_path', '', type=str) or str(MODEL_DIR)
             self.recorder.start()
             self.out.capture_owner=self.recorder
             if self.monitor_toggle.isChecked() and self.record_microphone.isChecked():
                 self._start_monitor(external=True)
-            self.keep_editable.setEnabled(False)
             self.record_microphone.setEnabled(False)
             self.canvas_resolution.setEnabled(False)
             self.canvas_fps.setEnabled(False)
@@ -2941,7 +2940,6 @@ class MainWindow(QMainWindow):
             self.out.capture_owner=None
             self.record_status.setText('Recording failed to start: ' + str(error))
             QMessageBox.warning(self, 'Recording failed to start', str(error))
-            self.keep_editable.setEnabled(True)
             self.record_microphone.setEnabled(True)
             self.canvas_resolution.setEnabled(True)
             self.canvas_fps.setEnabled(True)
@@ -2985,12 +2983,9 @@ class MainWindow(QMainWindow):
         if self.audio_monitor is not None:
             self._stop_monitor(keep_checkbox=True)
         self.record_toggle.setEnabled(False)
-        self.record_status.setText('Capture stopped—choose processing options.')
+        self.record_status.setText('Saving the original take for Review & Cut.')
         self.recorder.pause_capture()
-        from processing_ui import ProcessingChoices
-        if not self.recorder.error:
-            self.recorder.processing_options = ProcessingChoices(self, self.recorder.microphone,
-                                                                 self._voice_model_available()).options()
+        self.recorder.processing_options = {'manual_review': True}
         self.record_caption.setText('Saving…')
         self.recorder.finish_async()
         from processing_ui import RecordingProgress
@@ -3037,7 +3032,6 @@ class MainWindow(QMainWindow):
         self.audio_chain.setEnabled(True)
         self.record_toggle.setEnabled(True)
         self._set_recording_button(False)
-        self.keep_editable.setEnabled(True)
         self.record_microphone.setEnabled(True)
         if self.monitor_toggle.isChecked():
             self._start_monitor(external=False)
@@ -3057,6 +3051,10 @@ class MainWindow(QMainWindow):
             message.addButton(QMessageBox.StandardButton.Close)
             diagnostics.clicked.connect(lambda:QDesktopServices.openUrl(QUrl.fromLocalFile(str(recorder.path.with_suffix('.processing')))))
             message.exec()
+        elif 'manual_review' in recorder.processing_result:
+            self.recording_progress.close()
+            self.record_status.setText('Original saved. Review the take and choose your cuts.')
+            self._open_cut_review(recorder.processing_result['manual_review'], recorder.path.with_suffix('.cuts.json'))
         elif getattr(recorder, 'awaiting_review', False):
             self.record_status.setText('Analysis ready — approve word timings, then export. Source take retained.')
         else:
@@ -3068,6 +3066,30 @@ class MainWindow(QMainWindow):
         if 'alignment' in recorder.processing_result:
             self._open_alignment_review(recorder.processing_result['alignment'],
                                         recorder.path.with_suffix('.alignment.json'))
+
+    def _open_cut_review(self, data, path):
+        from manual_edit_ui import ReviewCut
+        from PySide6.QtCore import Qt
+        for dialog in self.findChildren(ReviewCut):
+            if dialog.path == Path(path):
+                dialog.show()
+                dialog.raise_()
+                return
+        dialog = ReviewCut(self, data, path)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.show()
+
+    def open_cut_review(self):
+        path, _ = QFileDialog.getOpenFileName(self, 'Open a saved cut review', self.record_dir,
+                                             'Cut review (*.cuts.json)')
+        if path:
+            try:
+                data = json.loads(Path(path).read_text(encoding='utf-8'))
+                if data.get('schema') != 1 or data.get('kind') != 'cut_review':
+                    raise ValueError('Choose a saved Review & Cut file.')
+                self._open_cut_review(data, path)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                QMessageBox.warning(self, 'Could not open cut review', str(error))
 
     def _open_alignment_review(self, data, path):
         from processing_ui import AlignmentReview
@@ -3448,11 +3470,10 @@ class MainWindow(QMainWindow):
         self.record_status = QLabel('Ready — FFmpeg required. Save as MP4 (H.264 + optional AAC audio).')
         self.record_status.setWordWrap(True)
         record_form.addRow('Status:', self.record_status)
-        self.keep_editable = QCheckBox('Prepare editable source for corrected text and advanced exports')
-        self.keep_editable.setChecked(True)
-        self.keep_editable.setToolTip('Uses additional disk space and prepares source tracks after Stop. Required to replace text after recording.')
-        record_form.addRow(self.keep_editable)
         review = QPushButton('Review saved word timings…')
+        cut_review = QPushButton('Open Review && Cut…')
+        cut_review.clicked.connect(self.open_cut_review)
+        record_form.addRow(cut_review)
         review.clicked.connect(self.open_alignment_review)
         record_form.addRow('Word alignment:', review)
 
@@ -4681,7 +4702,7 @@ class MainWindow(QMainWindow):
         return values
 
     def settings(self):
-        return dict(keep_windows_above_main=self.window_priority.isChecked(),pronunciations=self.pronunciation_entries,keep_editable=self.keep_editable.isChecked(), first_slide=self.start_first_slide.isChecked(),
+        return dict(keep_windows_above_main=self.window_priority.isChecked(),pronunciations=self.pronunciation_entries,first_slide=self.start_first_slide.isChecked(),
                     voice_following=self.start_voice_following.isChecked(),
                     mode=self.mode.currentText(), grouping=self.grouping.currentText(),
                     group_limit=self.group_limit.value(), chars=self.chars.value(),
@@ -5077,7 +5098,6 @@ class MainWindow(QMainWindow):
             self.pronunciation_entries=validate(values['pronunciations'])
             self.pronunciation_panel.refresh()
         self._apply_window_priority()
-        self.keep_editable.setChecked(bool(values.get('keep_editable', True)))
         self.start_first_slide.setChecked(bool(values.get('first_slide', True)))
         self.start_voice_following.setChecked(bool(values.get('voice_following', True)))
         # Signal blocking prevents reconstructing pages with half-loaded settings.

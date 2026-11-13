@@ -34,7 +34,6 @@ def main():
         import time
         from unittest.mock import patch
         from unittest.mock import Mock
-        from processing_ui import ProcessingChoices
         window.voice_worker = Mock(ready_for_recording=True)
         window.voice_worker.isRunning.return_value = True
         original_directory = window.record_dir
@@ -57,11 +56,7 @@ def main():
                     window.record_discard.click()
                 assert recorder.cancelled
             else:
-                def choose():
-                    assert recorder.stopping and not recorder._finish_started
-                    return {}
-                with patch.object(ProcessingChoices, 'options', side_effect=choose):
-                    window.record_toggle.click()
+                window.record_toggle.click()
                 assert recorder.stopping and not recorder.cancelled
             deadline = time.monotonic() + 20
             with patch.object(QMessageBox, 'information'), patch.object(QMessageBox, 'warning'):
@@ -71,6 +66,13 @@ def main():
             assert window.recorder is None and not recorder.error, recorder.error
             assert bool(list(destination.glob('*.mp4'))) != discard
             assert window.record_toggle.isEnabled() and not window.record_discard.isEnabled()
+            if not discard:
+                from manual_edit_ui import ReviewCut
+                editor = window.findChild(ReviewCut)
+                assert editor is not None
+                cut_preview = editor.grab()
+                editor.close()
+                application.processEvents()
         window.record_dir = original_directory
         window.record_microphone.setChecked(True)
         assert window.start_voice_following.isChecked()
@@ -86,6 +88,7 @@ def main():
         output.mkdir(parents=True, exist_ok=True)
         for previous in output.glob('*.png'):
             previous.unlink()
+        cut_preview.save(str(output / "review-and-cut.png"))
         top = window.centralWidget().findChild(QTabWidget)
         counter = 0
         def capture(name):
@@ -112,13 +115,8 @@ def main():
         application.processEvents()
         editor.grab().save(str(output / 'visual-layer-editor.png'))
         editor.close()
-        from processing_ui import ProcessingChoices, AlignmentReview
-        choices = ProcessingChoices(window, True, True)
-        choices.show()
-        application.processEvents()
-        choices.grab().save(str(output / 'processing-choices.png'))
-        choices.close()
         from recording_processing import align_script
+        from processing_ui import AlignmentReview
         review = AlignmentReview(window, align_script('All script words stay visible.', [], 4), local/'review.json')
         review.show()
         application.processEvents()
