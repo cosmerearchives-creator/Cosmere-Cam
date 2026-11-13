@@ -9,12 +9,143 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDoubleSpinBox, QHBoxLayout, QLabel, QListWidget,
-    QMessageBox, QPushButton, QVBoxLayout,
+    QMessageBox, QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
 from manual_edit import frame_time, kept_ranges, prepare_captions, suggest
 from recorder import resolve_processing_ffmpeg
+from review_media import WAVEFORM_RATE, build_preview, build_waveform
 from update_core import atomic_json
+
+
+class PreviewCanvas(QWidget):
+    """Center the video surface inside the available space."""
+    def __init__(self, width, height, parent):
+        super().__init__(parent)
+        self.aspect = width / height
+        self.video = QVideoWidget(self)
+        self.video.setStyleSheet('background-color: #211b2b;')
+        self.setMinimumHeight(220)
+
+    def resizeEvent(self, event):
+        width = min(self.width(), round(self.height() * self.aspect))
+        height = min(self.height(), round(width / self.aspect))
+        self.bounds = QRectF((self.width() - width) // 2, (self.height() - height) // 2,
+                             width, height)
+        self.video.setGeometry(self.bounds.adjusted(1, 1, -1, -1).toRect())
+        super().resizeEvent(event)
+
+    def paintEvent(self, event):
+        if hasattr(self, 'bounds'):
+            painter = QPainter(self)
+            painter.fillRect(self.bounds, QColor('#66547f'))
+
+
+class Waveform(QLabel):
+    seek = Signal(float)
+
+    def __init__(self, duration, has_audio, parent):
+        super().__init__(parent)
+        self.duration = duration
+        self.position = 0.
+        self.columns = []
+        self.peaks = None
+        self.message = 'Reading audio levels…' if has_audio else 'No recorded audio'
+        self.setFixedHeight(64)
+        self.setAccessibleName('Audio waveform')
+
+    def set_peaks(self, peaks):
+        self.peaks = peaks
+        self.rebuild_columns()
+
+    def resizeEvent(self, event):
+        self.rebuild_columns()
+        super().resizeEvent(event)
+
+    def rebuild_columns(self):
+        if self.peaks is not None:
+            width = max(1, self.width() - 16)
+            bins = self.duration * WAVEFORM_RATE
+            self.columns = []
+            for x in range(width):
+                start = int(x * bins / width)
+                end = max(start + 1, int((x + 1) * bins / width))
+                self.columns.append(max(self.peaks[start:end], default=0.))
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        width = max(1, self.width() - 16)
+        center = self.height() // 2
+        painter.fillRect(QRectF(8, 0, width, self.height()), QColor('#302943'))
+        if self.peaks is None:
+            painter.setPen(QColor('#f1e8ff'))
+            painter.drawText(QRectF(8, 0, width, self.height()), Qt.AlignmentFlag.AlignCenter, self.message)
+        else:
+            painter.setPen(QColor('#c6adff'))
+            for x, peak in enumerate(self.columns):
+                height = round(peak ** .6 * (center - 3))
+                painter.drawLine(x + 8, center - height, x + 8, center + height)
+        x = 8 + self.position * width / self.duration
+        painter.fillRect(QRectF(x, 0, 1, self.height()), QColor('#ffffff'))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.seek_at(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self.seek_at(event)
+
+    def seek_at(self, event):
+        fraction = (event.position().x() - 8) / max(1, self.width() - 16)
+        self.seek.emit(self.duration * max(0., min(1., fraction)))
+
+
+class PreviewWorker(QThread):
+    peaks_ready = Signal(object)
+    preview_ready = Signal(str)
+    waveform_failed = Signal()
+    preview_failed = Signal()
+
+    def __init__(self, source, directory, parent):
+        super().__init__(parent)
+        self.source = source
+        self.directory = directory
+        self.cancel = threading.Event()
+
+    def run(self):
+        from processing_session import ProcessingSession, active
+        ffmpeg = resolve_processing_ffmpeg()
+        source = self.source['original']
+        try:
+            session = ProcessingSession(Path(self.directory) / 'diagnostics')
+            with active(session):
+                self.prepare(ffmpeg, source, session)
+        except Exception:
+            if not self.cancel.is_set():
+                self.preview_failed.emit()
+                if self.source['audio']:
+                    self.waveform_failed.emit()
+
+    def prepare(self, ffmpeg, source, session):
+        if self.source['audio']:
+            session.begin('Reading audio levels')
+            try:
+                self.peaks_ready.emit(build_waveform(ffmpeg, source, self.directory, self.cancel))
+            except Exception:
+                if not self.cancel.is_set():
+                    self.waveform_failed.emit()
+        if self.cancel.is_set():
+            return
+        try:
+            session.begin('Preparing faster seeking')
+            preview = build_preview(ffmpeg, source, self.directory, self.cancel)
+            if not self.cancel.is_set():
+                self.preview_ready.emit(str(preview))
+        except Exception:
+            if not self.cancel.is_set():
+                self.preview_failed.emit()
 
 
 class Timeline(QLabel):
@@ -136,18 +267,30 @@ class ReviewCut(QDialog):
         self.setWindowTitle('Review & Cut')
         self.resize(1000, 720)
         layout = QVBoxLayout(self)
-        video = QVideoWidget(self)
-        video.setMinimumHeight(260)
-        layout.addWidget(video, 1)
+        source = data['source']
+        canvas = PreviewCanvas(source['width'], source['height'], self)
+        layout.addWidget(canvas, 1)
+        self.fast_preview = None
+        self.preview_active = False
+        self.restore_position = None
+        self.requested_position = None
+        self.seek_timer = QTimer(self)
+        self.seek_timer.setSingleShot(True)
+        self.seek_timer.timeout.connect(self.apply_scrub)
+        self.preview_note = QLabel('Preparing faster seeking…')
+        layout.addWidget(self.preview_note)
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.player.setAudioOutput(self.audio)
-        self.player.setVideoOutput(video)
+        self.player.setVideoOutput(canvas.video)
         self.player.errorOccurred.connect(lambda _, error: self.status.setText(error))
         self.timeline = Timeline(self.duration, self)
         layout.addWidget(self.timeline)
-        self.timeline.seek.connect(self.seek)
+        self.timeline.seek.connect(self.scrub)
         self.timeline.trim.connect(self.drag_trim)
+        self.waveform = Waveform(self.duration, source['audio'], self)
+        layout.addWidget(self.waveform)
+        self.waveform.seek.connect(self.scrub)
         playback = QHBoxLayout()
         layout.addLayout(playback)
         self.button(playback, 'Play / Pause', self.toggle_play)
@@ -158,6 +301,14 @@ class ReviewCut(QDialog):
         playback.addWidget(self.skip)
         self.position_label = QLabel()
         playback.addWidget(self.position_label)
+        self.level = QProgressBar()
+        self.level.setRange(0, 100)
+        self.level.setFixedWidth(100)
+        self.level.setTextVisible(False)
+        self.level.setAccessibleName('Audio level')
+        self.level.setToolTip('Recorded audio peak at the playhead')
+        self.level.setVisible(source['audio'])
+        playback.addWidget(self.level)
         trim = QHBoxLayout()
         layout.addLayout(trim)
         self.start = self.spin(trim, 'Keep from', data.get('keep_start', 0.))
@@ -213,7 +364,17 @@ class ReviewCut(QDialog):
         self.playback_clock = QTimer(self)
         self.playback_clock.timeout.connect(lambda: self.position_changed(self.player.position()))
         self.playback_clock.start(25)
-        self.player.setSource(QUrl.fromLocalFile(data['source']['original']))
+        self.player.mediaStatusChanged.connect(self.preview_status)
+        self.player.playbackStateChanged.connect(self.playback_state_changed)
+        self.player.setSource(QUrl.fromLocalFile(source['original']))
+        self.preview_work = tempfile.TemporaryDirectory(prefix='suite_preview_', ignore_cleanup_errors=True)
+        self.preview_worker = PreviewWorker(dict(source), self.preview_work.name, self)
+        self.preview_worker.peaks_ready.connect(self.waveform.set_peaks)
+        self.preview_worker.waveform_failed.connect(self.waveform_unavailable)
+        self.preview_worker.preview_ready.connect(self.preview_available)
+        self.preview_worker.preview_failed.connect(lambda: self.preview_note.setText('Playing original recording'))
+        self.preview_worker.finished.connect(self.preview_finished)
+        self.preview_worker.start()
         self.refresh_lists()
         self.position_changed(0)
         if data['source']['audio'] and not data.get('scanned'):
@@ -236,11 +397,70 @@ class ReviewCut(QDialog):
         layout.addWidget(spin)
         return spin
 
+    def waveform_unavailable(self):
+        self.waveform.message = 'Audio waveform unavailable'
+        self.waveform.update()
+
+    def preview_available(self, path):
+        if self.closing:
+            return
+        self.fast_preview = path
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            return
+        self.use_fast_preview()
+
+    def use_fast_preview(self):
+        if not self.fast_preview or self.preview_active or self.closing:
+            return
+        self.restore_position = self.position()
+        self.preview_active = True
+        self.player.setSource(QUrl.fromLocalFile(self.fast_preview))
+        self.preview_note.setText('Fast preview ready')
+
+    def playback_state_changed(self, state):
+        if state != QMediaPlayer.PlaybackState.PlayingState and self.restore_position is None:
+            self.use_fast_preview()
+
+    def preview_status(self, status):
+        if status in (QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia) and self.restore_position is not None:
+            target = self.restore_position
+            self.restore_position = None
+            self.seek(target)
+        elif status == QMediaPlayer.MediaStatus.InvalidMedia and self.preview_active:
+            self.restore_position = self.position()
+            self.preview_active = False
+            self.fast_preview = None
+            self.player.setSource(QUrl.fromLocalFile(self.data['source']['original']))
+            self.preview_note.setText('Playing original recording')
+
+    def preview_finished(self):
+        if self.closing:
+            self.close()
+
     def position(self):
+        for pending in (self.requested_position, self.restore_position):
+            if pending is not None:
+                return pending
         return frame_time(self.player.position() / 1000., self.data)
 
+    def scrub(self, seconds):
+        self.requested_position = frame_time(seconds, self.data)
+        self.show_position(self.requested_position)
+        if not self.seek_timer.isActive():
+            self.seek_timer.start(25)
+
+    def apply_scrub(self):
+        if self.requested_position is not None:
+            self.seek(self.requested_position)
+
     def seek(self, seconds):
-        self.player.setPosition(round(frame_time(seconds, self.data) * 1000))
+        self.seek_timer.stop()
+        self.requested_position = None
+        target = frame_time(seconds, self.data)
+        if self.restore_position is not None:
+            self.restore_position = target
+        else:
+            self.player.setPosition(round(target * 1000))
 
     def step(self, direction):
         self.player.pause()
@@ -260,11 +480,20 @@ class ReviewCut(QDialog):
                     self.seek(kept[0][0])
             self.player.play()
 
-    def position_changed(self, ms):
-        position = ms / 1000.
+    def show_position(self, position):
+        self.waveform.position = position
+        self.waveform.update()
+        peaks = self.waveform.peaks
+        index = int(position * WAVEFORM_RATE)
+        self.level.setValue(round(100 * peaks[index]) if peaks and 0 <= index < len(peaks) else 0)
         self.timeline.position = position
         self.timeline.update()
         self.position_label.setText(f'{position:.2f} / {self.duration:.2f} s')
+    def position_changed(self, ms):
+        if self.requested_position is not None or self.restore_position is not None:
+            return
+        position = ms / 1000.
+        self.show_position(position)
         if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
             return
         if self.skip.isChecked():
@@ -483,12 +712,16 @@ class ReviewCut(QDialog):
         self.close()
 
     def closeEvent(self, event):
+        self.closing = True
+        self.preview_worker.cancel.set()
         if self.worker is not None:
-            self.closing = True
             self.cancel_work()
+        if self.worker is not None or self.preview_worker.isRunning():
             event.ignore()
             return
+        self.seek_timer.stop()
         self.playback_clock.stop()
         self.player.stop()
         self.player.setSource(QUrl())
+        QTimer.singleShot(500, self.preview_work.cleanup)
         event.accept()
