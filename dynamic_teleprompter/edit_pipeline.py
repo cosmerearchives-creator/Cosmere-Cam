@@ -216,14 +216,19 @@ def caption_events(data,groups):
     return [merged[t] for t in sorted(merged)]
 
 
-def write_concat(events,images,duration,path):
+def write_concat(events,images,duration,path,fps=None):
     lines=['ffconcat version 1.0']
     for index,(time,*_) in enumerate(events):
         end=events[index+1][0] if index+1<len(events) else duration
         if end<=time:continue
         # Images are generated in this controlled directory with numeric names.
-        lines.extend([f"file '{Path(images[index]).name}'",f'duration {end-time:.9f}'])
+        lines.append(f"file '{Path(images[index]).name}'")
+        if fps:
+            lines.append(f'option framerate {fps}')
+        lines.append(f'duration {end-time:.9f}')
     lines.append(f"file '{Path(images[-1]).name}'")
+    if fps:
+        lines.append(f'option framerate {fps}')
     Path(path).write_text('\n'.join(lines)+'\n',encoding='utf-8')
 
 
@@ -233,7 +238,8 @@ def export_videos(data,concat,output_stem,ffmpeg,work,progress,cancel):
     if not source.is_file():raise ValueError('Editable source is missing. Original recording has not been changed.')
     baseline=Path(str(output_stem)+'_baseline.mp4');edited=Path(str(output_stem)+'_edited.mp4')
     stage=Path(work)/'baseline.mp4'
-    progress('Rendering approved text onto the baseline…')
+    progress('Rendering the written script' if data.get('kind') == 'manual_cut'
+             else 'Rendering approved text onto the baseline…')
     command=[ffmpeg,'-y','-v','error','-i',str(source),'-safe','0','-i',str(concat)]
     graph=f'[1:v]fps={data["source"]["fps"]},format=rgba[captions];[0:v][captions]overlay=eof_action=repeat:shortest=0[texted]'
     if foreground:
@@ -252,6 +258,11 @@ def export_videos(data,concat,output_stem,ffmpeg,work,progress,cancel):
     command+=['-/filter_complex',str(graphfile),'-map','[v]','-map','0:a?','-t',str(data['duration']),'-c:v','libx264',
               '-preset','veryfast','-crf','18','-pix_fmt','yuv420p','-c:a','copy','-movflags','+faststart',str(stage)]
     run_media(command,cancel)
+    if data.get('kind') == 'manual_cut':
+        if cancel.is_set():
+            raise RuntimeError('Export cancelled. Source take retained.')
+        publish_file(stage, edited)
+        return {'edited': str(edited)}
     cuts=data.get('cuts',[])
     if data.get('advanced_mode','off')!='off':
         fps=float(data['source']['fps'])

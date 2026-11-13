@@ -45,7 +45,13 @@ class ExportDialog(QDialog):
         self.temp=tempfile.TemporaryDirectory(prefix='suite_export_');self.work=Path(self.temp.name)
         self.project=data.get('render_project',{})
         self.groups=self.project.get('groups') or [data['script']]
-        self.events=caption_events(data,self.groups);self.images=[];self.position=0
+        if data.get('kind') == 'manual_cut':
+            from manual_edit import full_script_events
+            self.events = full_script_events(data, self.groups)
+        else:
+            self.events = caption_events(data, self.groups)
+        self.images = []
+        self.position = 0
         self.bar.setRange(0,len(self.events))
         self.timer=QTimer(self);self.timer.timeout.connect(self.render_next);self.timer.start(0)
     def render_next(self):
@@ -55,7 +61,9 @@ class ExportDialog(QDialog):
                 self.canvas=OutputWindow()
             if self.position>=len(self.events):
                 self.timer.stop();self.canvas.close();self.canvas=None
-                concat=self.work/'captions.ffconcat';write_concat(self.events,self.images,self.data['duration'],concat)
+                concat = self.work / 'captions.ffconcat'
+                fps = self.data['source']['fps'] if self.data.get('kind') == 'manual_cut' else None
+                write_concat(self.events, self.images, self.data['duration'], concat, fps=fps)
                 ffmpeg=resolve_processing_ffmpeg()
                 if not ffmpeg:raise RuntimeError('FFmpeg is unavailable.')
                 stem=self.data.get('output_stem') or str(self.review_path.with_suffix(''))
@@ -66,7 +74,11 @@ class ExportDialog(QDialog):
             time,text,number=self.events[self.position]
             settings=dict(self.project.get('settings',{}))
             layer=next((dict(layer) for layer in settings.get('media_layers',[]) if layer.get('type')=='text'),dict(type='text',visible=True))
-            behavior=settings.get('behavior','Replace')
+            if self.data.get('kind') == 'manual_cut':
+                layer['visible'] = True
+                behavior = 'Replace'
+            else:
+                behavior = settings.get('behavior', 'Replace')
             settings.update(media_layers=[layer],transparent=True,background_image='',mode='Script',instant=True,behavior='Replace',motion={})
             settings['canvas_resolution']=f'{self.data["source"]["width"]}x{self.data["source"]["height"]}'
             visual={} if number+1 in self.project.get('global_effect_exclusions',[]) else dict(self.project.get('visual_global',{}))
@@ -99,7 +111,7 @@ class ExportDialog(QDialog):
         except OSError as error:
             result['review_warning']='Video exported; review metadata could not be updated: '+str(error)
         self.status.setText('Export complete.\n\n'+'\n'.join(f'{key}: {value}' for key,value in result.items()))
-        self.open_button.show();folder=Path(result['baseline']).parent
+        self.open_button.show();folder=Path(result.get('edited') or result['baseline']).parent
         self.open_button.clicked.connect(lambda:QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))))
         self.bar.setRange(0,1);self.bar.setValue(1)
     def failed_export(self,message):

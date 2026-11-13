@@ -93,14 +93,19 @@ def run(command, **kwargs):
         raise RuntimeError('Recording processing failed: ' + detail[-2000:]) from exc
 
 
-def recognize_words(source,ffmpeg,model_path,directory):
+def recognize_words(source,ffmpeg,model_path,directory,cancel=None):
     from vosk import Model, KaldiRecognizer, SetLogLevel
     import wave
     from processing_session import current
     if current():current().begin('Extracting audio for speech alignment')
     audio = Path(directory) / 'alignment.wav'
-    run([ffmpeg, '-y', '-hide_banner', '-loglevel', 'error', '-i', str(source),
-         '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(audio)])
+    command = [ffmpeg, '-y', '-hide_banner', '-loglevel', 'error', '-i', str(source),
+               '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(audio)]
+    if cancel is None:
+        run(command)
+    else:
+        from edit_pipeline import run_media
+        run_media(command, cancel)
     if current():current().begin('Matching recorded speech')
     SetLogLevel(-1)
     recognizer = KaldiRecognizer(Model(str(model_path)), 16000)
@@ -108,6 +113,8 @@ def recognize_words(source,ffmpeg,model_path,directory):
     recognized = []
     with wave.open(str(audio), 'rb') as stream:
         while True:
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError("Speech analysis cancelled.")
             from processing_session import current
             if current():current().update(min(99,100*stream.tell()/max(1,stream.getnframes())))
             block = stream.readframes(8000)

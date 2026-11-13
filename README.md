@@ -29,7 +29,7 @@ The separate native VST2 helper uses the independently reverse-engineered FST AB
 
 ## Recording processing and text layers
 
-Start Recording waits for offline voice tracking to open the microphone, then starts capture and focuses Output for model controls. Stop ends capture and asks which optional processes to run: edge-only silence trimming, shortening internal pauses, and script-to-speech word alignment. Save without processing remains available; Discard skips every processing stage. Optional processing failures retain the original take.
+Stop saves the original and opens Review & Cut. Drag the trim handles or use Set Start and Set End. Mark In and Mark Out select a section to preview or remove. Removed sections can be restored. Suggested cough and repeat ranges require a manual decision. Review Captions & Export aligns the full written script against the kept speech and saves a separate edited MP4. Reopen decisions with Open Review & Cut in the Recording tab. Discard still skips saving and processing.
 
 Word alignment writes a `.alignment.json` sidecar and opens a full-script timing review. Unmatched words are interpolated between reliable neighbors, retained in full and flagged for approval. This estimates script timings; it does not measure audio/video offset or prove missing words were spoken. Saved reviews can be reopened from Microphone → Recording.
 
