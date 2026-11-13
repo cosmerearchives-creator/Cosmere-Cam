@@ -72,7 +72,11 @@ def main():
                 assert editor is not None
                 cut_preview = editor.grab()
                 editor.close()
-                application.processEvents()
+                deadline = time.monotonic() + 10
+                while window.findChild(ReviewCut) is not None and time.monotonic() < deadline:
+                    application.processEvents()
+                    time.sleep(.01)
+                assert window.findChild(ReviewCut) is None
         window.record_dir = original_directory
         window.record_microphone.setChecked(True)
         assert window.start_voice_following.isChecked()

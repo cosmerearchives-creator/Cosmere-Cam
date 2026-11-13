@@ -32,6 +32,9 @@ def export_in_progress(window):
     from PySide6.QtWidgets import QDialog
     for dialog in window.findChildren(QDialog):
         worker=getattr(dialog,'worker',None)
+        preview_worker=getattr(dialog,'preview_worker',None)
+        if preview_worker is not None and preview_worker.isRunning():
+            return True
         timer=getattr(dialog,'timer',None)
         if (worker is not None and worker.isRunning()) or (timer is not None and timer.isActive()):
             return True
