@@ -1699,17 +1699,30 @@ class OutputWindow(QWidget):
         started = time.perf_counter()
         try:
             width, height = self.canvas_size
-            frame = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
-            frame.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(frame)
-            try:
-                # PySide6 requires the targetOffset argument for the QPainter overload.
-                self.scene.layout.activate()
+            editable = getattr(self, 'capture_editable', False)
+            static_background = editable and all(
+                layer.get('type') == 'text' or not layer.get('visible', True)
+                for layer in self.scene._media_layers)
+            background_key = (width, height, self.scene._background_key,
+                              self.scene._background_pixmap.cacheKey())
+            self.scene.layout.activate()
+            if static_background and background_key == getattr(self, '_capture_background_key', None):
+                frame = QImage(self._capture_background)
+                painter = QPainter(frame)
+                self.editable_background = self._capture_background
+            else:
+                frame = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+                frame.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(frame)
                 self.scene.paint_background(painter)
+                if editable:
+                    self.editable_background = frame.copy()
+                    if static_background:
+                        self._capture_background = self.editable_background
+                        self._capture_background_key = background_key
+            try:
                 stage_times['background_media_ms'] = (time.perf_counter() - started) * 1000
                 text_started = time.perf_counter()
-                if getattr(self, 'capture_editable', False):
-                    self.editable_background = frame.copy()
                 layer = next((e for e in self.scene._media_layers if e.get('type') == 'text'), {})
                 if layer.get('visible', True):
                     labels = [label for label in self.labels if not label.isHidden()]
@@ -3266,7 +3279,10 @@ class MainWindow(QMainWindow):
         self.mic_decay_timer.setInterval(250)
         self.mic_decay_timer.timeout.connect(self.update_mic_indicator)
         self.mic_decay_timer.start()
-        tabs.addTab(self._scroll_page(script_page), 'Script Playback')
+        tabs.addTab(self._scroll_page(script_page), 'Record Room')
+        from editing_room import EditingRoom
+        self.editing_room = EditingRoom(self)
+        tabs.addTab(self._scroll_page(self.editing_room), 'Editing Room')
 
         settings_page = QWidget()
         scroll = QScrollArea()
@@ -3767,7 +3783,7 @@ class MainWindow(QMainWindow):
         voice_page.layout().addWidget(default_model_button)
         voice_tabs.addTab(self._scroll_page(voice_page), 'Voice Tracking')
         voice_tabs.addTab(self._scroll_page(self.speech_demo), 'Speech Test')
-        tabs.addTab(voice_tabs, 'Microphone')
+        tabs.addTab(voice_tabs, 'Audio')
         output_tabs = QTabWidget()
         output_tabs.addTab(self._scroll_page(settings_page), 'Content')
         canvas_columns = QHBoxLayout(canvas_page)
@@ -3821,7 +3837,7 @@ class MainWindow(QMainWindow):
         self.update_text_effects_sample()
         output_tabs.addTab(self._scroll_page(combined_text_page), 'Text Effects')
         output_tabs.addTab(self._scroll_page(animation_page), 'Animations')
-        tabs.addTab(output_tabs, 'Output')
+        tabs.addTab(output_tabs, 'Video')
         settings_home = QWidget()
         settings_home_layout = QVBoxLayout(settings_home)
         settings_home_layout.addWidget(QLabel('Application settings and project information'))
@@ -5212,7 +5228,7 @@ class MainWindow(QMainWindow):
             data = dict(project=self._project_payload(), project_path=str(self.project_path or ''),
                         last_models={str(i): layer.get('_movement_last_model', '') for i,layer in enumerate(self.media_layers)},
                         index=self.index, awaiting_first=self.awaiting_first,
-                        voice_cursor=self.voice_cursor, tab=self.main_tabs.currentIndex(),
+                        voice_cursor=self.voice_cursor, tab=self.main_tabs.currentIndex(), tab_layout=2,
                         record_dir=self.record_dir, tracking_mode=self.tracking_mode.currentText(),
                         microphone=self.microphones.currentText(),
                         subtabs=[widget.currentIndex() for widget in self.main_tabs.findChildren(QTabWidget)],
@@ -5251,7 +5267,10 @@ class MainWindow(QMainWindow):
             self.awaiting_first = bool(data.get('awaiting_first', True))
             self.voice_cursor = max(0, min(len(normalized_words(' '.join(self.groups))), int(data.get('voice_cursor', 0))))
             self.reader.set_progress(self.voice_cursor)
-            self.main_tabs.setCurrentIndex(max(0, min(self.main_tabs.count()-1, int(data.get('tab', 0)))))
+            tab = int(data.get('tab', 0))
+            if data.get('tab_layout') != 2 and tab > 0:
+                tab += 1
+            self.main_tabs.setCurrentIndex(max(0, min(self.main_tabs.count()-1, tab)))
             self.project_path = Path(data['project_path']) if data.get('project_path') else None
             self.project_label.setText(self.project_path.name if self.project_path else 'Restored session')
             self.record_dir = str(data.get('record_dir', self.record_dir))

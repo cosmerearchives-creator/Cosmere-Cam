@@ -96,3 +96,7 @@ Disabled VST2 effects are not eagerly loaded on startup, avoiding unnecessary in
 ## Processing encoder compatibility
 
 From v0.6.1, recording finalization, trimming, timing-review previews and exports prefer the included FFmpeg (imageio-ffmpeg 0.8.1). Custom FFmpeg locations still control capture/video playback; source installs without a bundled binary fall back to the configured/system executable. This isolates processing from incompatible external development builds. Diagnostics record both choices. No timeout or stall-detection gate is relaxed.
+
+### Editing Room
+
+Import a local video or open an existing Review & Cut file. An optional script helps identify restarts and can be aligned after editing. Imported videos default to preserving the original picture, including any burned-in captions. Reopen a Suite take with its editable tracks to rebuild captions. The v0.7.1 release remains the fallback for this phase.

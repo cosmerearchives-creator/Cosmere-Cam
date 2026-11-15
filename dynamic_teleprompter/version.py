@@ -1,4 +1,4 @@
 """Single release version; changing main triggers a tested release."""
 APP_NAME = 'Cosmere Video Recording Suite'
-VERSION = '0.7.1'
-RELEASE_NOTES = 'Review & Cut uses a lightweight preview with frequent keyframes for faster timeline seeking.\nThe video canvas matches the recording aspect ratio. A seekable waveform and audio level meter help locate cut points.'
+VERSION = '0.8.0'
+RELEASE_NOTES = 'Editing Room opens videos and saved takes for a fresh detection pass, manual cuts and optional caption alignment.\nImproved restart and cough suggestions, including repeat suggestions without a script.\nEditable capture reuses unchanged image planes. Duplicate launches now identify the running program.'

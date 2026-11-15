@@ -108,9 +108,12 @@ class DeploymentTests(unittest.TestCase):
 
     def test_os_lock_prevents_concurrent_install(self):
         with core.install_lock(self.root):
-            with self.assertRaises(OSError):
+            expected = core.AlreadyRunningError if os.name == 'nt' else OSError
+            with self.assertRaises(expected) as conflict:
                 with core.install_lock(self.root):
                     self.fail('Second instance acquired lock')
+            if os.name == 'nt':
+                self.assertEqual(str(conflict.exception), 'Permission Denied: Program Already Running')
 
     def test_stale_source_checkout_cannot_downgrade_managed_install(self):
         core.deploy(self.root, self.new)
@@ -256,4 +259,3 @@ class BusyTests(unittest.TestCase):
             path = Path(folder) / 'pending.json'
             path.write_text('{incomplete')
             self.assertIsNone(core.read_json(path))
-

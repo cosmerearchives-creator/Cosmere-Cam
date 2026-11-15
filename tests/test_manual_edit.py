@@ -102,3 +102,56 @@ class ManualEditTests(unittest.TestCase):
             self.assertFalse((root / 'take_baseline.mp4').exists())
             dialog.close()
             qt.processEvents()
+
+    def test_import_with_captions_off_exports_picture_without_script(self):
+        import subprocess
+        import tempfile
+        import threading
+        from editing_room import inspect_video
+        from imageio_ffmpeg import read_frames
+        from manual_edit import export_picture
+        from recorder import resolve_processing_ffmpeg
+
+        ffmpeg = resolve_processing_ffmpeg()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            original = root / 'old take.mp4'
+            subprocess.run([ffmpeg, '-y', '-v', 'error', '-f', 'lavfi', '-i',
+                            'color=c=red:s=64x96:r=10:d=2', '-f', 'lavfi', '-i',
+                            'sine=sample_rate=48000:duration=2', '-c:v', 'libx264',
+                            '-c:a', 'aac', str(original)], capture_output=True, check=True, timeout=15)
+            original_bytes = original.read_bytes()
+            duration, source = inspect_video(original)
+            self.assertTrue(source['audio'])
+            self.assertEqual((source['width'], source['height']), (64, 96))
+            data = dict(duration=duration, source=source, output_stem=str(root / 'import'))
+            result = export_picture(data, [dict(start=.5, end=1.)],
+                                    ffmpeg, root, threading.Event())
+            reader = read_frames(result['edited'])
+            try:
+                self.assertTrue(next(reader)['audio_codec'])
+                self.assertEqual(sum(1 for _ in reader), 15)
+            finally:
+                reader.close()
+            self.assertEqual(original.read_bytes(), original_bytes)
+
+    def test_unscripted_restart_requires_pause_and_keeps_second_attempt(self):
+        from manual_edit import unscripted_restarts
+        phrase = 'this is the whole point'.split()
+        words = [dict(word=word, start=i*.2 + (1 if i >= 5 else 0),
+                      end=i*.2 + .15 + (1 if i >= 5 else 0), conf=.95)
+                 for i, word in enumerate(phrase * 2)]
+        self.assertEqual([(item['start'], item['end']) for item in unscripted_restarts(words)], [(0., 2.)])
+        words[5]['conf'] = .1
+        self.assertEqual(unscripted_restarts(words), [])
+
+    def test_cough_can_span_short_gap(self):
+        import numpy as np
+        samples = np.zeros(32000, dtype=np.int16)
+        rng = np.random.default_rng(42)
+        for start in (8000, 9600):
+            samples[start:start + 1200] = rng.integers(-10000, 10000, 1200)
+        candidates = detect_cough_candidates(samples, 16000, [])
+        self.assertEqual(len(candidates), 1)
+        self.assertLess(candidates[0]['start'], .5)
+        self.assertGreater(candidates[0]['end'], .66)
