@@ -141,6 +141,18 @@ class Recovery(unittest.TestCase):
         self.assertEqual(output.getvalue()[-4:],bytes([0,0,140,255]))
         self.assertLess(r.encoded_unique_frames,8)
 
+    def test_overload_spreads_repeated_frames_across_queued_spans(self):
+        recorder = CanvasRecorder('unused.mp4', 4, 4, 30, microphone=False)
+        with patch.object(recorder, 'frames_due', return_value=1):
+            for index in range(24):
+                image = QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied)
+                image.fill(QColor(index, 0, 0))
+                recorder.push_frame(image)
+        counts = [packet.count for packet in recorder._frames.queue]
+        self.assertEqual(sum(counts), 24)
+        self.assertLessEqual(max(counts), 3)
+        self.assertEqual(recorder.frame_count, 24)
+
     def test_pause_rejects_capture_without_waiting_for_device_close(self):
         r=CanvasRecorder('unused.mp4',64,64,10);r._started=time.monotonic();r._stream=Mock()
         r.pause_capture();self.assertTrue(r.stopping);r._stream.stop.assert_not_called()

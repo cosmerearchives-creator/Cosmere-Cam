@@ -1,6 +1,4 @@
 """Manual cut decisions and caption preparation for a saved recording."""
-import math
-import tempfile
 from pathlib import Path
 
 from edit_pipeline import complement, cut_media, propose_retakes, run_media
@@ -67,6 +65,12 @@ def detect_cough_candidates(samples, rate, recognized):
         rms[first:last] = np.sqrt(np.mean(frames * frames, axis=1))
     floor = max(350., float(np.percentile(rms, 25)) * 6)
     active = rms > floor
+    # A cough can contain several bursts separated by a short quiet gap.
+    # Bridge up to 60 ms, but keep the gap outside the peak measurement.
+    activity_edges = np.flatnonzero(np.diff(np.r_[True, active, True]))
+    for start, end in zip(activity_edges[::2], activity_edges[1::2]):
+        if start > 0 and end < count and end - start <= 3:
+            active[start:end] = True
     changes = np.flatnonzero(np.diff(np.r_[False, active, False]))
     result = []
     for first, last in zip(changes[::2], changes[1::2]):
@@ -103,7 +107,13 @@ def suggest(data, ffmpeg, work, cancel):
         coughs = detect_cough_candidates(samples, 16000, recognized)
     finally:
         del samples
-    return sorted(coughs + propose_retakes(data['script'], recognized), key=lambda c: c['start'])
+    from pronunciations import rewrite_words
+    script = data['script']
+    matched = rewrite_words(recognized, data.get('pronunciations', []), script)
+    retakes = propose_retakes(script, matched)
+    if not script.strip():
+        retakes = unscripted_restarts(recognized)
+    return sorted(coughs + retakes, key=lambda c: c['start'])
 
 
 def prepare_captions(data, cuts, ffmpeg, work, cancel, progress):
@@ -140,3 +150,44 @@ def prepare_captions(data, cuts, ffmpeg, work, cancel, progress):
                    processing_directory=data['processing_directory'])
     full_script_events(aligned, caption_groups(data))
     return aligned
+
+
+def unscripted_restarts(recognized):
+    """Flag an exact phrase repeated after a pause for manual review."""
+    from edit_pipeline import normalize_word
+    words = [normalize_word(item['word']) for item in recognized]
+    result = []
+    for second in range(5, len(words) - 4):
+        pause = recognized[second]['start'] - recognized[second - 1]['end']
+        if not .4 <= pause <= 5:
+            continue
+        for length in range(5, min(12, second, len(words) - second) + 1):
+            first = second - length
+            phrase = words[first:second]
+            if phrase != words[second:second + length] or len(set(phrase)) < 4:
+                continue
+            if any(word.get('conf', 1.) < .75 for word in recognized[first:second + length]):
+                continue
+            result.append(dict(start=recognized[first]['start'], end=recognized[second]['start'],
+                               reason='Possible repeated phrase'))
+            break
+    return result
+
+
+def export_picture(data, cuts, ffmpeg, work, cancel):
+    import shutil
+    from edit_pipeline import publish_file
+    source = Path(data['source']['original']).resolve()
+    target = Path(data['output_stem'] + '_edited.mp4').resolve()
+    if source == target:
+        raise ValueError('Choose a different export path from the original video.')
+    staged = Path(work) / 'edited.mp4'
+    kept = kept_ranges(data, cuts)
+    if kept == [(0., data['duration'])] and source.suffix.lower() == '.mp4':
+        shutil.copyfile(source, staged)
+    else:
+        cut_media(source, staged, kept, ffmpeg, work, audio=data['source']['audio'], cancel=cancel)
+    if cancel.is_set():
+        raise RuntimeError('Export cancelled.')
+    publish_file(staged, target)
+    return {'edited': str(target)}

@@ -277,12 +277,15 @@ class CanvasRecorder:
                 if self.frame_count-self.encoder_writes+due>self.fps*2:
                     self.error='Video encoder remained over two seconds behind; recording stopped with recovery.'
                     return
-                # Coalesce the oldest timing span, retaining its first image and
-                # the next span's latest image. Memory stays bounded; time is not cut.
+                # Merge the shortest adjacent pair so overload doesn't accumulate
+                # one long freeze at the front of the queue.
                 with self._frames.mutex:
-                    if len(self._frames.queue)>=self._frames.maxsize:
-                        old=self._frames.queue.popleft()
-                        following=self._frames.queue[0]
+                    pending = self._frames.queue
+                    if len(pending) >= self._frames.maxsize:
+                        index = min(range(len(pending) - 1),
+                                    key=lambda i: pending[i].count + pending[i + 1].count)
+                        old, following = pending[index], pending[index + 1]
+                        del pending[index]
                         following.count+=old.count
                         following.previous=old.previous if old.count>1 and old.previous is not None else old.pixels
                         self.queue_batches_coalesced+=1
@@ -298,7 +301,10 @@ class CanvasRecorder:
 
     def _write_frames(self):
         try:
-            last_written_key=None;cached_key=None;cached_planes=None
+            last_written_key = None
+            cached_key = None
+            cached_planes = None
+            plane_cache = None
             while not self.cancelled:
                 packet=self._frames.get()
                 if packet is None:break
@@ -310,8 +316,11 @@ class CanvasRecorder:
                     if isinstance(pixels,tuple):
                         key=tuple(plane.cacheKey() for plane in pixels)
                         if key!=cached_key:
-                            from capture_planes import planes
-                            cached_planes=planes(pixels);cached_key=key
+                            if plane_cache is None:
+                                from capture_planes import PlaneCache
+                                plane_cache = PlaneCache()
+                            cached_planes = plane_cache.planes(pixels, key)
+                            cached_key = key
                         for part in cached_planes:self._video.stdin.write(part)
                     else:
                         pixel_format=QImage.Format.Format_ARGB32 if self.alpha and not self.alpha_conversion_offloaded else QImage.Format.Format_ARGB32_Premultiplied
@@ -319,7 +328,8 @@ class CanvasRecorder:
                         self._video.stdin.write(native.constBits())
                     elapsed=(time.perf_counter()-started)*1000
                     self._encoder_pending_since=0.
-                    key=tuple(plane.cacheKey() for plane in pixels) if isinstance(pixels,tuple) else pixels.cacheKey()
+                    if not isinstance(pixels, tuple):
+                        key = pixels.cacheKey()
                     if key!=last_written_key:self.encoded_unique_frames+=1
                     last_written_key=key
                     self.encoder_writes+=1

@@ -221,7 +221,19 @@ class EditWorker(QThread):
             ffmpeg = resolve_processing_ffmpeg()
             if not ffmpeg:
                 raise RuntimeError('FFmpeg is unavailable.')
-            if self.cuts is None:
+            if self.cuts is not None and not self.data.get('align_captions', True):
+                from manual_edit import export_picture
+                session = ProcessingSession(self.data['processing_directory'])
+                session.begin_export()
+                session.begin('Exporting the edited video')
+                try:
+                    with active(session):
+                        result = export_picture(self.data, self.cuts, ffmpeg, self.work, self.cancel)
+                    session.finish('complete')
+                except Exception:
+                    session.finish('cancelled' if self.cancel.is_set() else 'failed')
+                    raise
+            elif self.cuts is None:
                 session = ProcessingSession(Path(self.data['processing_directory']) / 'suggestions')
                 session.duration = self.data['duration']
                 session.begin('Finding suggested cuts')
@@ -352,7 +364,8 @@ class ReviewCut(QDialog):
         layout.addLayout(actions)
         self.scan = self.button(actions, 'Find Suggestions', self.find_suggestions)
         self.scan.setEnabled(data['source']['audio'])
-        self.export = self.button(actions, 'Review Captions && Export', self.prepare_export)
+        export_label = 'Review Captions && Export' if data.get('align_captions', True) else 'Export Edited Video'
+        self.export = self.button(actions, export_label, self.prepare_export)
         self.cancel = self.button(actions, 'Cancel Analysis', self.cancel_work)
         self.cancel.hide()
         self.button(actions, 'Close', self.close)
@@ -643,8 +656,14 @@ class ReviewCut(QDialog):
         except ValueError as error:
             self.status.setText(str(error))
             return
+        if not self.data.get('align_captions', True):
+            target = Path(self.data['output_stem'] + '_edited.mp4')
+            if target.exists() and QMessageBox.question(self, 'Replace edited export?',
+                    f'Replace {target.name}?', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
         self.player.pause()
-        self.start_worker(cuts, 'Preparing the edited take for caption review')
+        self.start_worker(cuts, 'Preparing the edited take')
 
     def start_worker(self, cuts, message):
         if self.worker is not None:
@@ -687,6 +706,8 @@ class ReviewCut(QDialog):
                 self.data['scanned'] = True
                 self.refresh_lists()
                 self.status.setText(f'{len(result)} suggested sections. Review a suggestion before removing it.')
+            elif result is not None and 'edited' in result:
+                self.status.setText('Exported ' + result['edited'])
             elif result is not None:
                 from processing_ui import AlignmentReview
                 review_path = Path(self.work.name) / 'caption-review.json'

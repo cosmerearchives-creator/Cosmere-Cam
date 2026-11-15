@@ -341,6 +341,10 @@ def recover(root):
     return True
 
 
+class AlreadyRunningError(PermissionError):
+    pass
+
+
 @contextlib.contextmanager
 def install_lock(root, wait=False):
     """Launcher owns this OS-released lock for the entire application lifetime."""
@@ -359,9 +363,12 @@ def install_lock(root, wait=False):
                 try:
                     msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
                     break
-                except OSError:
-                    if time.monotonic() >= deadline:
+                except OSError as error:
+                    import errno
+                    if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
                         raise
+                    if time.monotonic() >= deadline:
+                        raise AlreadyRunningError('Permission Denied: Program Already Running') from error
                     time.sleep(.1)
         else:
             import fcntl

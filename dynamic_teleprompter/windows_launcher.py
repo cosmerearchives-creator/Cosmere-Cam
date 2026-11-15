@@ -37,20 +37,26 @@ def shortcut(root):
     """Use a temporary script, never interpolate a user path into shell code."""
     if os.name != 'nt':
         return
-    script = root / 'create-shortcut.vbs'
+    launcher = root / 'CosmereCamLauncher.exe'
+    active = read_json(root / 'active.json')
+    if active:
+        candidate = version_path(root, active) / launcher.name
+        if candidate.is_file():
+            launcher = candidate
+    script = root / ('create-shortcut-' + uuid.uuid4().hex + '.vbs')
     script.write_text('Set sh = CreateObject("WScript.Shell")\n'
                       'Set link = sh.CreateShortcut(WScript.Arguments(0))\n'
                       'link.TargetPath = WScript.Arguments(1)\nlink.Save\n'
                       'Set fs = CreateObject("Scripting.FileSystemObject")\n'
                       'If fs.FileExists(WScript.Arguments(2)) Then\n'
                       '  Set old = sh.CreateShortcut(WScript.Arguments(2))\n'
-                      '  If LCase(old.TargetPath) = LCase(WScript.Arguments(1)) Then fs.DeleteFile WScript.Arguments(2)\n'
+                      '  If LCase(old.TargetPath) = LCase(WScript.Arguments(3)) Then fs.DeleteFile WScript.Arguments(2)\n'
                       'End If\n', encoding='utf-8')
     target = Path(os.environ['APPDATA']) / ('Microsoft/Windows/Start Menu/Programs/' + APP_NAME + '.lnk')
     legacy = target.with_name('Cosmere-Cam.lnk')
     target.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(['cscript.exe', '//nologo', str(script), str(target),
-                    str(root / 'CosmereCamLauncher.exe'), str(legacy)], check=True,
+                    str(launcher), str(legacy), str(root / 'CosmereCamLauncher.exe')], check=True,
                    creationflags=subprocess.CREATE_NO_WINDOW)
     script.unlink(missing_ok=True)
 
