@@ -237,6 +237,9 @@ def export_videos(data,concat,output_stem,ffmpeg,work,progress,cancel):
     source=Path(data['source']['scene']);foreground=data['source'].get('foreground')
     if not source.is_file():raise ValueError('Editable source is missing. Original recording has not been changed.')
     baseline=Path(str(output_stem)+'_baseline.mp4');edited=Path(str(output_stem)+'_edited.mp4')
+    if data.get('kind') == 'manual_cut' and data['source'].get('original'):
+        if edited.resolve() == Path(data['source']['original']).resolve():
+            raise ValueError('Choose a different export path from the original video.')
     stage=Path(work)/'baseline.mp4'
     progress('Rendering the written script' if data.get('kind') == 'manual_cut'
              else 'Rendering approved text onto the baseline…')

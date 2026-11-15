@@ -2,9 +2,10 @@
 import hashlib
 import json
 import math
+import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox, QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton,
     QTextEdit, QVBoxLayout, QWidget,
@@ -49,6 +50,7 @@ class EditingRoom(QWidget):
         self.path = None
         self.saved = None
         self.probe = None
+        self.analysis_worker = None
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel('Script for this edit'))
         self.script = QTextEdit()
@@ -127,7 +129,7 @@ class EditingRoom(QWidget):
     def probe_finished(self):
         self.probe.deleteLater()
         self.probe = None
-        self.setEnabled(True)
+        self.setEnabled(self.analysis_worker is None)
 
     def import_failed(self, error):
         self.selection.setText(str(self.path))
@@ -177,4 +179,41 @@ class EditingRoom(QWidget):
         project['groups'] = groups_from_script(script, self.main.grouping.currentText(),
             self.main.group_limit.value(), self.main.chars.value(), self.main.lines.value())
         data['render_project'] = project
-        self.main._open_cut_review(data, path)
+        if not source['audio']:
+            self.main._open_cut_review(data, path)
+            return
+        from manual_edit_ui import EditWorker
+        self.setEnabled(False)
+        self.selection.setText('Checking for possible coughs and restarts…')
+        self.analysis_work = tempfile.TemporaryDirectory(prefix='suite_import_analysis_')
+        self.analysis_data = data
+        self.analysis_path = path
+        self.analysis_error = None
+        self.analysis_worker = EditWorker(data, None, self.analysis_work.name, self)
+        self.analysis_worker.ready.connect(self.analysis_ready)
+        self.analysis_worker.failed.connect(self.analysis_failed)
+        self.analysis_worker.finished.connect(self.analysis_finished)
+        self.analysis_worker.start()
+
+    @Slot(object)
+    def analysis_ready(self, items):
+        self.analysis_data['suggestions'] = items
+
+    @Slot(str)
+    def analysis_failed(self, message):
+        self.analysis_data['suggestions'] = []
+        self.analysis_error = message
+
+    @Slot()
+    def analysis_finished(self):
+        self.analysis_worker.deleteLater()
+        self.analysis_worker = None
+        self.analysis_work.cleanup()
+        self.setEnabled(True)
+        self.selection.setText(str(self.path))
+        self.analysis_data['scanned'] = True
+        if self.analysis_error:
+            QMessageBox.warning(self, 'Suggestions unavailable',
+                                'You can still edit this video and retry Find Suggestions in the editor.\n\n'
+                                + self.analysis_error)
+        self.main._open_cut_review(self.analysis_data, self.analysis_path)

@@ -30,9 +30,11 @@ def read_token():
 
 def export_in_progress(window):
     from PySide6.QtWidgets import QDialog
-    probe = getattr(getattr(window, 'editing_room', None), 'probe', None)
-    if probe is not None and probe.isRunning():
-        return True
+    room = getattr(window, 'editing_room', None)
+    for name in ('probe', 'analysis_worker'):
+        worker = getattr(room, name, None)
+        if worker is not None and worker.isRunning():
+            return True
     for dialog in window.findChildren(QDialog):
         worker=getattr(dialog,'worker',None)
         preview_worker=getattr(dialog,'preview_worker',None)
